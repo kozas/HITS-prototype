@@ -4,6 +4,7 @@ extends Node3D
 ##
 ## Per battalion: root Node3D (anchor transform)
 ##   ├─ MultiMeshInstance3D: one instance per man (NEAR / MID / FAR tiers)
+##   ├─ MultiMeshInstance3D staff: officers, NCOs, drummers, colour guard (NEAR / MID)
 ##   ├─ MeshInstance3D ribbon: whole battalion as one box (RIBBON tier)
 ##   └─ MeshInstance3D flag
 
@@ -24,10 +25,12 @@ var los_per_frame := 12
 
 var terrain
 var soldier_mat: ShaderMaterial
+var staff_mat: ShaderMaterial
 var ribbon_mat: ShaderMaterial
 var flag_mat: ShaderMaterial
 var tier_meshes: Array = []
 var mesh_ribbon: ArrayMesh
+var mesh_staff: ArrayMesh
 var mesh_flag: ArrayMesh
 var entries: Array = []
 var tier_men := [0, 0, 0, 0, 0]
@@ -42,17 +45,24 @@ class Entry:
 	var root: Node3D
 	var mmi: MultiMeshInstance3D
 	var mm: MultiMesh
+	var staff: MultiMeshInstance3D
 	var ribbon: MeshInstance3D
 	var flag: MeshInstance3D
 	var tier := -1
 	var last_p := Vector2(INF, INF)
 	var last_yaw := INF
 	var last_ftype := -1
+	var flag_from := Vector2.ZERO
+	var flag_to := Vector2.ZERO
+	var flag_moving := false
 
 
 func setup(t, formations: Array, brigades: Array) -> void:
 	terrain = t
 	soldier_mat = _material("res://shaders/soldier.gdshader")
+	staff_mat = _material("res://shaders/soldier.gdshader")
+	staff_mat.set_shader_parameter("staff", true)
+	mesh_staff = Meshes.staff()
 	ribbon_mat = _material("res://shaders/ribbon.gdshader")
 	flag_mat = _material("res://shaders/flag.gdshader")
 	tier_meshes = [Meshes.soldier_near(), Meshes.soldier_mid(), Meshes.soldier_far()]
@@ -60,6 +70,12 @@ func setup(t, formations: Array, brigades: Array) -> void:
 	mesh_flag = Meshes.flag()
 	for f in formations:
 		_create(f, brigades[f.brigade])
+
+
+## Drives every soldier animation; call once per frame with the render-time clock.
+func set_sim_time(t: float) -> void:
+	soldier_mat.set_shader_parameter("sim_time", t)
+	staff_mat.set_shader_parameter("sim_time", t)
 
 
 func _material(path: String) -> ShaderMaterial:
@@ -111,6 +127,18 @@ func _create(f, b) -> void:
 	e.mmi.custom_aabb = AABB(Vector3(-140, -40, -60), Vector3(280, 80, 260))
 	e.root.add_child(e.mmi)
 
+	# 5 per company (captain, lieutenant, 2 sergeants, drummer) + 12 battalion staff.
+	var smm := MultiMesh.new()
+	smm.transform_format = MultiMesh.TRANSFORM_3D
+	smm.mesh = mesh_staff
+	smm.instance_count = 5 * f.companies + 12
+	smm.buffer = _identity_buffer(smm.instance_count)
+	e.staff = MultiMeshInstance3D.new()
+	e.staff.multimesh = smm
+	e.staff.material_override = staff_mat
+	e.staff.custom_aabb = e.mmi.custom_aabb
+	e.root.add_child(e.staff)
+
 	e.ribbon = MeshInstance3D.new()
 	e.ribbon.mesh = mesh_ribbon
 	e.ribbon.material_override = ribbon_mat
@@ -126,7 +154,7 @@ func _create(f, b) -> void:
 	e.root.add_child(e.flag)
 
 	var cols := palette(f.army, b.id)
-	for node in [e.mmi, e.ribbon]:
+	for node in [e.mmi, e.staff, e.ribbon]:
 		node.set_instance_shader_parameter("coat_color", cols[0])
 		node.set_instance_shader_parameter("trim_color", cols[1])
 		node.set_instance_shader_parameter("trouser_color", cols[2])
@@ -168,6 +196,11 @@ func update(cam: Vector3, alpha: float, time: float) -> void:
 			_apply_tier(e, tier)
 		if f.render_dirty:
 			_push(e)
+		if e.flag_moving:
+			var k := clampf((time - f.trans_start) / maxf(f.trans_dur, 0.1), 0.0, 1.0)
+			var fp: Vector2 = e.flag_from.lerp(e.flag_to, k)
+			e.flag.position = Vector3(fp.x, 0, fp.y)
+			e.flag_moving = k < 1.0
 		tier_men[tier] += f.strength
 		tier_bns[tier] += 1
 
@@ -204,34 +237,39 @@ func _apply_tier(e: Entry, t: int) -> void:
 	e.root.visible = true
 	var men := t <= Tier.FAR
 	e.mmi.visible = men
+	e.staff.visible = t <= Tier.MID
 	e.ribbon.visible = t == Tier.RIBBON
 	e.flag.visible = t != Tier.RIBBON
 	if men:
 		e.mm.mesh = tier_meshes[t]
-		e.mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if t == Tier.NEAR else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var shadow := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if t == Tier.NEAR else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		e.mmi.cast_shadow = shadow
+		e.staff.cast_shadow = shadow
 
 
 ## Event-driven: only called when the sim marks the battalion dirty.
 func _push(e: Entry) -> void:
 	var f: Formation = e.f
 	f.render_dirty = false
-	e.mmi.set_instance_shader_parameter("form_state", Vector4(f.ftype_from, f.ftype, f.trans_start, f.trans_dur))
-	e.mmi.set_instance_shader_parameter("form_dims", Vector4(f.strength, f.ranks, f.id, 0.0))
-	e.mmi.set_instance_shader_parameter("anim_state", Vector4(1.0 if f.moving else 0.0, f.last_volley, f.rout_amount, 2.2 if f.routing else 1.0))
+	var cadence: float = f.speed() / Formation.ORDINARY_STEP if f.moving else 1.0
+	var form_state := Vector4(f.ftype_from, f.ftype, f.trans_start, f.trans_dur)
+	var form_dims := Vector4(f.strength, f.ranks, f.id, f.companies)
+	var anim_state := Vector4(1.0 if f.moving else 0.0, f.last_volley, f.rout_amount, cadence)
+	var drill_state := Vector4(f.moving_since, 0.0, 0.0, 0.0)
+	for node in [e.mmi, e.staff]:
+		node.set_instance_shader_parameter("form_state", form_state)
+		node.set_instance_shader_parameter("form_dims", form_dims)
+		node.set_instance_shader_parameter("anim_state", anim_state)
+		node.set_instance_shader_parameter("drill_state", drill_state)
 	e.mm.visible_instance_count = f.strength
 	var fp: Vector2 = f.footprint()
 	e.ribbon.set_instance_shader_parameter("ribbon_dims", Vector4(fp.x, fp.y, 0.0, 0.0))
 	if f.ftype != e.last_ftype:
+		# The colours march with their guard: tweened over the change of formation.
+		e.flag_from = f.colour_pos(f.ftype_from if e.last_ftype >= 0 else f.ftype)
+		e.flag_to = f.colour_pos(f.ftype)
 		e.last_ftype = f.ftype
-		var z := 2.0
-		match f.ftype:
-			T.LINE:
-				z = (f.ranks - 1) * Formation.RANK_D * 0.5
-			T.SQUARE:
-				z = fp.y * 0.5
-			T.MARCH:
-				z = 8.0
-		e.flag.position = Vector3(0, 0, z)
+		e.flag_moving = true
 
 
 ## Round-robin line of sight from the player's eye to each battalion (centre and

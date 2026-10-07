@@ -10,7 +10,8 @@ var seen := {}
 
 
 func _initialize() -> void:
-	main = load("res://main.tscn").instantiate()
+	root.get_node("GameState").scenario = 0  # BENCHMARK
+	main = load("res://battle.tscn").instantiate()
 	root.add_child(main)
 
 

@@ -76,7 +76,7 @@ func _draw() -> void:
 			p = f.seen_pos
 			yaw = f.seen_facing
 			ft = f.seen_ftype
-		_draw_block(p, yaw, Formation.footprint_for(ft, f.strength, f.ranks), col)
+		_draw_block(p, yaw, f.footprint_as(ft), col)
 
 	for b in sim.brigades:
 		if b.army != main.PLAYER_ARMY or b.alive().is_empty():

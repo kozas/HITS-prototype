@@ -1,7 +1,9 @@
 extends Node3D
-## M0 stress test bootstrap: builds the world, owns the frame loop, input,
-## HUD and the scripted benchmark (run with `-- --bench`).
+## Battle scene: builds the world for the scenario chosen in the menu
+## (GameState.scenario), owns the frame loop, input, HUD and the scripted
+## benchmark (run with `-- --bench`).
 
+const GS = preload("res://src/game_state.gd")
 const Terrain = preload("res://src/terrain.gd")
 const BattleSim = preload("res://src/battle_sim.gd")
 const FormationRenderer = preload("res://src/formation_renderer.gd")
@@ -17,6 +19,17 @@ const Formation = preload("res://src/formation.gd")
 
 const PLAYER_ARMY := 0
 const TIME_SCALES := [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+## Brigade contact: front rank to front rank at the start. Lines advance at
+## the ordinary step (0.82 m/s) and musketry starts at 180 m centre to centre,
+## so ~30 s to contact.
+const CONTACT_GAP := 202.0
+
+var scenario: int = GS.Scenario.BENCHMARK
+var menu_open := false
+var autoshot_dir := ""
+var _autoshot_t := 0.0
+var _autoshots := [4.0, 20.0, 34.0, 50.0]
+var _look_grace := 0
 
 var terrain
 var sim
@@ -55,6 +68,7 @@ var _bench_results: Array = []
 
 
 func _ready() -> void:
+	scenario = GameState.scenario
 	_parse_args()
 	_vp = get_viewport().get_viewport_rid()
 	RenderingServer.viewport_set_measure_render_time(_vp, true)
@@ -66,7 +80,12 @@ func _ready() -> void:
 	terrain.generate(1815)
 
 	sim = BattleSim.new(terrain)
-	sim.deploy(bns_per_side, men, front_z)
+	var site := Vector2.ZERO
+	if scenario == GS.Scenario.BRIGADE_CONTACT:
+		site = _pick_contact_site()
+		sim.deploy_contact(site, men, CONTACT_GAP)
+	else:
+		sim.deploy(bns_per_side, men, front_z)
 	sim._rebuild_grid()
 
 	renderer = FormationRenderer.new()
@@ -87,15 +106,21 @@ func _ready() -> void:
 	couriers.notify = func(text: String) -> void: hud.toast(text)
 	sim.order_sink = func(o: Dictionary) -> void: couriers.dispatch(o, _hq_for(o.army))
 
-	_place_enemy_hq()
-
 	player = PlayerRider.new()
 	add_child(player)
-	player.setup(terrain, Vector2(120, front_z + 380), 0.0)
 	free_cam = FreeCam.new()
 	add_child(free_cam)
 	free_cam.setup(terrain)
-	free_cam.place(Vector3(0, 420, front_z + 1500), 0.0, -0.3)
+	if scenario == GS.Scenario.BRIGADE_CONTACT:
+		var spot := _pick_contact_viewpoint(site)
+		var look := Vector2(site.x, site.y) - spot
+		player.setup(terrain, spot, atan2(-look.x, -look.y))
+		var fc := Vector2(site.x + 420.0, site.y + 260.0)
+		free_cam.place(Vector3(fc.x, terrain.height(fc.x, fc.y) + 70.0, fc.y), deg_to_rad(50.0), -0.3)
+	else:
+		_place_enemy_hq()
+		player.setup(terrain, Vector2(120, front_z + 380), 0.0)
+		free_cam.place(Vector3(0, 420, front_z + 1500), 0.0, -0.3)
 	player.camera.current = true
 
 	var ui := CanvasLayer.new()
@@ -103,23 +128,76 @@ func _ready() -> void:
 	hud = Hud.new()
 	ui.add_child(hud)
 	hud.setup()
+	hud.build_pause_menu(_close_menu, GameState.to_menu)
 	map = MapOverlay.new()
 	ui.add_child(map)
 	map.setup(self)
 
-	print("HITS M0: %d battalions, %d men, built in %d ms" % [sim.formations.size(), sim.soldiers_alive(), Time.get_ticks_msec() - t0])
+	print("HITS M0 (%s): %d battalions, %d men, built in %d ms" % [GS.Scenario.keys()[scenario], sim.formations.size(), sim.soldiers_alive(), Time.get_ticks_msec() - t0])
 	if bench:
 		_bench_init()
 	else:
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-		hud.toast("11:00. The armies are deploying. Press M for the map.")
+		_capture_mouse()
+		if scenario == GS.Scenario.BRIGADE_CONTACT:
+			hud.toast("11:00. Your brigade is advancing on the Allied line, %d m ahead." % int(CONTACT_GAP))
+		else:
+			hud.toast("11:00. The armies are deploying. Press M for the map.")
+
+
+## Find open, level ground for the contact so neither line is hidden from the
+## other (or from the general) by a fold in the terrain. Deterministic for a seed.
+func _pick_contact_site() -> Vector2:
+	var best := Vector2.ZERO
+	var best_score := INF
+	for ix in range(-6, 7):
+		for iz in range(-5, 6):
+			var c := Vector2(ix * 300.0, iz * 300.0)
+			var lo := INF
+			var hi := -INF
+			for sx in range(-8, 9):
+				for sz in [-0.6, -0.3, 0.0, 0.3, 0.6, 0.9, 1.2]:
+					var h: float = terrain.height(c.x + sx * 75.0, c.y + sz * CONTACT_GAP)
+					lo = minf(lo, h)
+					hi = maxf(hi, h)
+			var score := (hi - lo) + c.length() * 0.002
+			if score < best_score:
+				best_score = score
+				best = c
+	return best
+
+
+## Where the general watches from: the first candidate (right flank first,
+## then behind the line) with a clear line of sight to every battalion.
+func _pick_contact_viewpoint(site: Vector2) -> Vector2:
+	var back := site.y + CONTACT_GAP * 0.5
+	var candidates := [
+		Vector2(site.x + 330.0, back + 30.0), Vector2(site.x + 250.0, back + 45.0),
+		Vector2(site.x - 330.0, back + 30.0), Vector2(site.x + 470.0, back + 60.0),
+		Vector2(site.x + 150.0, back + 70.0), Vector2(site.x + 380.0, back + 120.0),
+		Vector2(site.x - 470.0, back + 60.0), Vector2(site.x + 60.0, back + 45.0),
+	]
+	for c in candidates:
+		var eye := Vector3(c.x, terrain.height(c.x, c.y) + PlayerRider.EYE, c.y)
+		var clear := true
+		for f in sim.formations:
+			var p: Vector2 = f.center()
+			if not terrain.line_of_sight(eye, Vector3(p.x, terrain.height(p.x, p.y) + 2.0, p.y), 24):
+				clear = false
+				break
+		if clear:
+			print("contact site %s, general at %s" % [site, c - site])
+			return c
+	return candidates[-1]
 
 
 func _parse_args() -> void:
 	for a in OS.get_cmdline_user_args():
 		if a == "--bench":
 			bench = true
+			scenario = GS.Scenario.BENCHMARK
 			front_z = 450.0
+		elif a.begins_with("--autoshot="):
+			autoshot_dir = a.get_slice("=", 1)
 		elif a.begins_with("--bns="):
 			bns_per_side = int(a.get_slice("=", 1))
 		elif a.begins_with("--men="):
@@ -200,7 +278,7 @@ func issue_player_order(brigade_id: int, dest: Vector2, facing: float, ftype: in
 func clock_text() -> String:
 	var s := int(sim.time) + 11 * 3600
 	var ts: float = _ts_override if _ts_override >= 0.0 else TIME_SCALES[time_scale_idx]
-	return "%02d:%02d:%02d  %s" % [s / 3600, (s / 60) % 60, s % 60, "PAUSED" if paused else "x%s" % str(ts)]
+	return "%02d:%02d:%02d  %s" % [s / 3600, (s / 60) % 60, s % 60, "PAUSED" if paused or menu_open else "x%s" % str(ts)]
 
 
 # ---------------------------------------------------------------- input
@@ -208,23 +286,29 @@ func clock_text() -> String:
 func _unhandled_input(event: InputEvent) -> void:
 	if bench:
 		return
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and _look_grace == 0:
 		var rel: Vector2 = (event as InputEventMouseMotion).relative
 		if using_free_cam:
 			free_cam.look(rel)
 		else:
 			player.look(rel)
-	elif event is InputEventMouseButton and event.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and not map.visible:
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	elif event is InputEventMouseButton and event.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and not map.visible and not menu_open:
+		_capture_mouse()
 	elif event is InputEventKey and event.pressed and not event.echo:
-		match (event as InputEventKey).keycode:
+		var key := (event as InputEventKey).keycode
+		if key == KEY_ESCAPE:
+			if map.visible:
+				_toggle_map()
+			elif menu_open:
+				_close_menu()
+			else:
+				_open_menu()
+			return
+		if menu_open:
+			return
+		match key:
 			KEY_M, KEY_TAB:
 				_toggle_map()
-			KEY_ESCAPE:
-				if map.visible:
-					_toggle_map()
-				else:
-					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 			KEY_F:
 				_set_free_cam(not using_free_cam)
 			KEY_EQUAL, KEY_KP_ADD:
@@ -251,9 +335,33 @@ func _unhandled_input(event: InputEvent) -> void:
 				map.order_ftype = (event as InputEventKey).keycode - KEY_1
 
 
+## Capturing warps the cursor, which arrives as one large mouse motion: ignore
+## look input for a few frames so the view doesn't jump.
+func _capture_mouse() -> void:
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_look_grace = 3
+
+
+## Esc menu: pauses the battle and offers a way back to the main menu.
+func _open_menu() -> void:
+	menu_open = true
+	hud.pause_panel.visible = true
+	hud.resume_button.grab_focus()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func _close_menu() -> void:
+	menu_open = false
+	hud.pause_panel.visible = false
+	_capture_mouse()
+
+
 func _toggle_map() -> void:
 	map.visible = not map.visible
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if map.visible else Input.MOUSE_MODE_CAPTURED
+	if map.visible:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		_capture_mouse()
 
 
 func _set_free_cam(on: bool) -> void:
@@ -271,8 +379,11 @@ func _process(delta: float) -> void:
 	if bench:
 		_bench_step(delta)
 	var ts: float = _ts_override if _ts_override >= 0.0 else TIME_SCALES[time_scale_idx]
-	if paused:
+	if paused or menu_open:
 		ts = 0.0
+	_look_grace = maxi(_look_grace - 1, 0)
+	if autoshot_dir != "":
+		_autoshot(delta)
 	var t0 := Time.get_ticks_usec()
 	sim.advance(delta * ts)
 	couriers.update(delta * ts, sim.time)
@@ -282,14 +393,14 @@ func _process(delta: float) -> void:
 		smoke.update_dust(sim.formations, sim.time, terrain)
 	var t1 := Time.get_ticks_usec()
 
-	player.input_enabled = not map.visible and not using_free_cam and not bench
-	free_cam.input_enabled = using_free_cam and not map.visible and not bench
+	player.input_enabled = not map.visible and not using_free_cam and not bench and not menu_open
+	free_cam.input_enabled = using_free_cam and not map.visible and not bench and not menu_open
 	player.update(delta)
 	free_cam.update(delta)
 	var cam: Camera3D = free_cam if using_free_cam else player.camera
 	var render_time: float = sim.time - BattleSim.TICK * (1.0 - sim.alpha())
 	renderer.update(cam.global_position, sim.alpha(), sim.time)
-	renderer.soldier_mat.set_shader_parameter("sim_time", render_time)
+	renderer.set_sim_time(render_time)
 	smoke.mat.set_shader_parameter("sim_time", render_time)
 	var t2 := Time.get_ticks_usec()
 	_sim_usec = t1 - t0
@@ -299,6 +410,26 @@ func _process(delta: float) -> void:
 	if _hud_t <= 0.0:
 		_hud_t = 0.25
 		_update_hud()
+
+
+## Dev aid (`-- --autoshot=DIR`): screenshots at fixed times, then quit.
+func _autoshot(delta: float) -> void:
+	_autoshot_t += delta
+	if _autoshots.is_empty():
+		get_tree().quit()
+		return
+	if _autoshot_t >= _autoshots[0]:
+		var t: float = _autoshots.pop_front()
+		get_viewport().get_texture().get_image().save_png(autoshot_dir.path_join("%s_%02ds.png" % [GS.Scenario.keys()[scenario].to_lower(), int(t)]))
+		print("[autoshot] t=%.0fs sim=%.1fs engaged=%d fallen=%d" % [t, sim.time, _engaged_count(), corpses.total])
+
+
+func _engaged_count() -> int:
+	var n := 0
+	for f in sim.formations:
+		if f.engaged:
+			n += 1
+	return n
 
 
 func _consume_events() -> void:
@@ -362,7 +493,7 @@ func _bench_next() -> void:
 		return
 	var seg: Dictionary = _bench_segments[_bench_idx]
 	_bench_t = 0.0
-	_bench_rec = {"ms": [], "gpu": 0.0, "script": 0.0, "draws": 0.0, "prims": 0.0, "n": 0, "shot": false}
+	_bench_rec = {"ms": [], "gpu": 0.0, "rcpu": 0.0, "script": 0.0, "draws": 0.0, "prims": 0.0, "n": 0, "shot": false}
 	_ts_override = seg.ts
 	renderer.lod_mode = seg.lod
 	renderer.los_enabled = seg.los
@@ -413,6 +544,7 @@ func _bench_step(delta: float) -> void:
 	if seg.rec and _bench_t > 1.5:
 		_bench_rec.ms.append(delta * 1000.0)
 		_bench_rec.gpu += RenderingServer.viewport_get_measured_render_time_gpu(_vp)
+		_bench_rec.rcpu += RenderingServer.viewport_get_measured_render_time_cpu(_vp) + RenderingServer.get_frame_setup_time_cpu()
 		_bench_rec.script += (_sim_usec + _render_usec) / 1000.0
 		_bench_rec.draws += RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
 		_bench_rec.prims += RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME)
@@ -440,7 +572,7 @@ func _bench_summary(seg: Dictionary) -> Dictionary:
 	var tm: Array = renderer.tier_men
 	return {
 		"name": seg.name, "fps": 1000.0 / maxf(avg, 0.001), "avg": avg, "p99": p99,
-		"gpu": _bench_rec.gpu / n, "script": _bench_rec.script / n,
+		"gpu": _bench_rec.gpu / n, "rcpu": _bench_rec.rcpu / n, "script": _bench_rec.script / n,
 		"draws": _bench_rec.draws / n, "prims": _bench_rec.prims / n / 1.0e6,
 		"tiers": "%dk/%dk/%dk/%dk/%dk" % [tm[0] / 1000, tm[1] / 1000, tm[2] / 1000, tm[3] / 1000, tm[4] / 1000],
 	}
@@ -452,9 +584,9 @@ func _bench_finish() -> void:
 	out.append("HITS M0 benchmark  |  %s  |  %dx%d  |  %d battalions, %d men at start, %d alive, %d fallen" % [
 		RenderingServer.get_video_adapter_name(), size.x, size.y, sim.formations.size(),
 		sim.formations.size() * men, sim.soldiers_alive(), corpses.total])
-	out.append("%-36s %7s %8s %8s %8s %9s %7s %8s  %s" % ["segment", "fps", "avg ms", "p99 ms", "GPU ms", "script ms", "draws", "prims M", "men near/mid/far/ribbon/hidden"])
+	out.append("%-36s %7s %8s %8s %8s %8s %9s %7s %8s  %s" % ["segment", "fps", "avg ms", "p99 ms", "GPU ms", "rCPU ms", "script ms", "draws", "prims M", "men near/mid/far/ribbon/hidden"])
 	for r in _bench_results:
-		out.append("%-36s %7.1f %8.2f %8.2f %8.2f %9.2f %7d %8.2f  %s" % [r.name, r.fps, r.avg, r.p99, r.gpu, r.script, int(r.draws), r.prims, r.tiers])
+		out.append("%-36s %7.1f %8.2f %8.2f %8.2f %8.2f %9.2f %7d %8.2f  %s" % [r.name, r.fps, r.avg, r.p99, r.gpu, r.rcpu, r.script, int(r.draws), r.prims, r.tiers])
 	var text := "\n".join(out)
 	print(text)
 	if bench_out != "":

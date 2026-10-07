@@ -10,6 +10,10 @@ const TICK := 0.1
 const CELL := 300.0
 const FIRE_RANGE := 180.0
 const MAP_LIMIT := 2900.0
+## Companies per battalion: French 6 (from 1808), British 10.
+const COMPANIES := [6, 10]
+## Interval between battalions side by side (15.6 m in the French drill).
+const BN_INTERVAL := 15.6
 
 
 class Brigade:
@@ -80,34 +84,12 @@ func deploy(bns_per_side: int, men: int, front_z: float) -> void:
 			var in_row := mini(per_row, brig_count - row * per_row)
 			var bx := (col - (in_row - 1) * 0.5) * 640.0
 			var bz := sgn * (front_z + row * 260.0)
-			var b := Brigade.new()
-			b.id = brigades.size()
-			b.army = army
-			b.row = row
-			b.label = "%s Bde %d" % ["Fr" if army == 0 else "Al", bi + 1]
-			b.ai_next = rng.randf_range(20.0, 120.0)
-			brigades.append(b)
+			var b := _add_brigade(army, row, "%s Bde %d" % ["Fr" if army == 0 else "Al", bi + 1])
 			for k in per_brigade:
 				if made >= bns_per_side:
 					break
-				var f := Formation.new()
-				f.id = formations.size()
-				f.army = army
-				f.brigade = b.id
-				f.label = "%d/%d" % [k + 1, bi + 1]
-				f.ranks = 3 if army == 0 else 2
-				f.max_strength = men
-				f.strength = men
-				f.facing = yaw
-				f.prev_facing = yaw
-				f.ftype = T.COLUMN
-				f.ftype_from = T.COLUMN
-				f.pos = Vector2(bx, bz) + right * (k - (per_brigade - 1) * 0.5) * 120.0
-				f.prev_pos = f.pos
-				f.refresh_shape()
-				f.next_fire = rng.randf_range(0.0, 10.0)
-				b.battalions.append(f)
-				formations.append(f)
+				var p := Vector2(bx, bz) + right * (k - (per_brigade - 1) * 0.5) * 120.0
+				_add_battalion(b, "%d/%d" % [k + 1, bi + 1], men, p, yaw, T.COLUMN)
 				made += 1
 			# Opening orders, delivered before the battle: first line deploys forward,
 			# second line follows in column, the rest wait in reserve.
@@ -118,6 +100,67 @@ func deploy(bns_per_side: int, men: int, front_z: float) -> void:
 				o.delivered = 0.0
 				o.exec_at = rng.randf_range(0.0, 30.0)
 				b.pending.append(o)
+
+
+## Small engagement: one brigade per side in line, `gap` metres apart (front
+## rank to front rank) around `site`. The French brigade is already advancing
+## on the Allied line, which stands and waits. Neither side has an AI general.
+func deploy_contact(site: Vector2, men: int, gap: float) -> void:
+	var names := ["1st Brigade (Fr)", "Allied Brigade"]
+	for army in 2:
+		var yaw := 0.0 if army == 0 else PI
+		var right := Vector2(cos(yaw), -sin(yaw))
+		var front := Vector2(site.x, site.y + gap * (0.5 if army == 0 else -0.5))
+		var b := _add_brigade(army, 0, names[army])
+		var ranks := 3 if army == 0 else 2
+		var w: float = Formation.footprint_for(T.LINE, men, ranks, COMPANIES[army]).x
+		var total := 4.0 * w + 3.0 * BN_INTERVAL
+		for k in 4:
+			var p := front + right * (-total * 0.5 + w * 0.5 + k * (w + BN_INTERVAL))
+			_add_battalion(b, ["1st", "2nd", "3rd", "4th"][k], men, p, yaw, T.LINE)
+		hq[army] = front + Vector2(0, 600.0 if army == 0 else -600.0)
+	# Advance to 60 m short of the enemy line: close enough to stay in line
+	# (no column for the march) and the halt-and-fire SOP stops them at musket range.
+	var o := make_order(brigades[0], Vector2(site.x, site.y - gap * 0.5 + 60.0), 0.0, T.LINE)
+	o.status = "staff"
+	o.delivered = 0.0
+	o.exec_at = 0.0
+	brigades[0].pending.append(o)
+	ai_enabled = [false, false]
+
+
+func _add_brigade(army: int, row: int, label: String) -> Brigade:
+	var b := Brigade.new()
+	b.id = brigades.size()
+	b.army = army
+	b.row = row
+	b.label = label
+	b.ai_next = rng.randf_range(20.0, 120.0)
+	brigades.append(b)
+	return b
+
+
+func _add_battalion(b: Brigade, label: String, men: int, p: Vector2, yaw: float, ftype: int) -> Formation:
+	var f := Formation.new()
+	f.id = formations.size()
+	f.army = b.army
+	f.brigade = b.id
+	f.label = label
+	f.ranks = 3 if b.army == 0 else 2
+	f.companies = COMPANIES[b.army]
+	f.max_strength = men
+	f.strength = men
+	f.facing = yaw
+	f.prev_facing = yaw
+	f.ftype = ftype
+	f.ftype_from = ftype
+	f.pos = p
+	f.prev_pos = p
+	f.refresh_shape()
+	f.next_fire = rng.randf_range(0.0, 10.0)
+	b.battalions.append(f)
+	formations.append(f)
+	return f
 
 
 func make_order(b, dest: Vector2, facing: float, ftype: int) -> Dictionary:
@@ -244,11 +287,13 @@ func _apply_order(b, o: Dictionary) -> void:
 	var facing: float = o.facing
 	var right := Vector2(cos(facing), -sin(facing))
 	bns.sort_custom(func(a, c): return a.pos.dot(right) < c.pos.dot(right))
-	var gap := 35.0 if ft == T.LINE else 80.0
+	# Columns keep deploying distance (the frontage of the line they would form)
+	# so each battalion can deploy without crowding its neighbours.
+	var gap := BN_INTERVAL
 	var widths := []
 	var total := gap * (bns.size() - 1)
 	for f in bns:
-		var w: float = Formation.footprint_for(ft, f.strength, f.ranks).x
+		var w: float = f.footprint_as(ft if ft == T.MARCH else T.LINE).x
 		widths.append(w)
 		total += w
 	var x := -total * 0.5
@@ -275,10 +320,16 @@ func _move(f: Formation, dt: float) -> void:
 	if f.dead:
 		return
 	var was_moving: bool = f.moving
+	if f.ftype_from != f.ftype and time > f.trans_start + f.trans_dur + 10.0:
+		# Drill finished (with margin for the slowest section): the shader can go
+		# back to computing a single formation per man.
+		f.ftype_from = f.ftype
+		f.render_dirty = true
 	# Fast path: most battalions are standing still at any moment.
 	if not f.has_target and not f.routing and f.rout_amount == 0.0:
 		if was_moving:
 			f.moving = false
+			f.moving_since = time
 			f.render_dirty = true
 		return
 	f.moving = false
@@ -323,6 +374,7 @@ func _move(f: Formation, dt: float) -> void:
 
 	f.pos = f.pos.clamp(Vector2(-MAP_LIMIT, -MAP_LIMIT), Vector2(MAP_LIMIT, MAP_LIMIT))
 	if f.moving != was_moving:
+		f.moving_since = time
 		f.render_dirty = true
 
 

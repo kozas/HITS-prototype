@@ -5,12 +5,14 @@ const HELP := """[W] trot  [Shift+W] gallop  [Ctrl+W] walk  [S] back  [A/D] side
 [M]/[Tab] map & orders    [F] free camera (QE up/down, Shift fast)
 [=]/[-] time scale   [P] pause   [G] AI autopilot for your army
 [L] LOD mode   [O] LOS culling   [K] chaos: everyone changes formation
-[H] hide help   [Esc] release mouse"""
+[H] hide help   [Esc] menu"""
 
 var stats: Label
 var clock: Label
 var help: Label
 var toasts: VBoxContainer
+var pause_panel: PanelContainer
+var resume_button: Button
 
 
 func setup() -> void:
@@ -32,6 +34,41 @@ func setup() -> void:
 	toasts.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_pin(toasts, Vector4(0, 1, 0, 1), Vector4(12, -12, 700, -12))
 	add_child(toasts)
+
+
+## Esc menu: Resume / Main menu, centred, hidden until opened.
+func build_pause_menu(on_resume: Callable, on_menu: Callable) -> void:
+	pause_panel = PanelContainer.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.085, 0.08, 0.065, 0.94)
+	style.border_color = Color(0.4, 0.34, 0.24)
+	style.set_border_width_all(1)
+	style.set_content_margin_all(24)
+	pause_panel.add_theme_stylebox_override("panel", style)
+	_pin(pause_panel, Vector4(0.5, 0.5, 0.5, 0.5), Vector4(-170, -95, 170, 95))
+	pause_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	pause_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 10)
+	pause_panel.add_child(col)
+	var title := Label.new()
+	title.text = "Paused"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 24)
+	title.add_theme_color_override("font_color", Color(0.93, 0.88, 0.74))
+	col.add_child(title)
+	resume_button = Button.new()
+	resume_button.text = "Resume"
+	resume_button.custom_minimum_size = Vector2(290, 44)
+	resume_button.pressed.connect(on_resume)
+	col.add_child(resume_button)
+	var menu := Button.new()
+	menu.text = "Main menu"
+	menu.custom_minimum_size = Vector2(290, 44)
+	menu.pressed.connect(on_menu)
+	col.add_child(menu)
+	pause_panel.visible = false
+	add_child(pause_panel)
 
 
 ## anchors / offsets as (left, top, right, bottom)

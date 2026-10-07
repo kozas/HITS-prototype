@@ -73,11 +73,13 @@ because it causes shimmer and aliasing. The trick is to make the far image
   transition start time, strength, last volley time, rout amount and colours.
   They change only on *events*, so a quiet formation costs the CPU nothing except
   its node transform while it moves.
-- **Formation changes** (line → column → square) are a shader lerp between two
-  slot layouts with a per-man random delay. The men visibly shuffle into place,
-  and it costs the CPU one uniform write.
+- **Formation changes** (line → column → square) are performed as drill (§3a):
+  sections march as rigid blocks from their old place to their new one. It
+  costs the CPU one uniform write.
 - **Marching** is a per-vertex leg swing and bob driven by `sim_time`, with all
   men in step (as they actually marched) plus a tiny per-man phase jitter.
+  Cadence follows ground speed: the ordinary step (76/min) for lines, the quick
+  step (100/min) for columns and manoeuvres.
 - **Volleys**: the front two ranks bring muskets to "present", then fire raggedly
   (per-man random delay), with a muzzle flash. Again, one uniform (`last_volley`).
 - **Casualties**: `visible_instance_count = strength`, and the layout is computed
@@ -92,6 +94,48 @@ The same "stateless" pattern applies to **smoke**. Puffs are a ring buffer
 written once at spawn time. Drift, growth and fade are computed in the shader
 from `sim_time - spawn_time`. Thousands of drifting smoke banks cost almost
 nothing on the CPU.
+
+### 3a. The battalion as it appears: companies, officers and drill
+
+The battalion is still the only simulated unit, but it is *drawn* as its real
+organisation. The source is the 1791 French regulations as summarised at
+[napoleonistyka](https://www.napolun.com/mirror/napoleonistyka.atspace.com/infantry_tactics_4.htm).
+
+- **Companies.** French battalions have 6 companies (voltigeurs on the left,
+  grenadiers on the right) and British battalions 10. Each company is two
+  sections, with the captain in the front rank on its right. Files are 0.6 m
+  (elbow to elbow), ranks 0.65 m apart (0.325 m gap), and the lieutenant and
+  sergeants stand 2 paces behind the rear rank.
+- **Staff** use a second small instance batch per battalion, drawn in the near
+  and mid tiers. One mesh holds every variant and the shader shows the parts
+  each role carries:
+  - captains and lieutenants with sword, bicorne and epaulettes
+  - sergeants with muskets
+  - one drummer per company, drawn into a band behind the centre (behind the column, at the head of a march)
+  - the mounted chef de bataillon, the adjutant-major and the sous-adjutant-major
+  - two guides généraux, 4 paces behind the flanks at the halt and 6 paces ahead once the battalion advances
+  - the caporal d'encadrement
+  - a 2×3 colour guard around the colours
+- **Formations are built from sections:**
+  - *Line:* companies side by side, with the colour guard in the centre.
+  - *Column by division, formed on the centre:* the two centre companies (and the colours) lead, at half a company's frontage between divisions.
+  - *Square, formed from the column:* the leading division faces out, the rear division faces about, and the companies between wheel outward to form the sides, making the oblong square of the period.
+  - *March:* an open column of sections at full distance, grenadiers leading.
+- **Drill.** On the word of command each section faces the way it must go,
+  marches there at the quick step (keeping its shape) and fronts. Line to
+  column takes about 50 s, column to square about 26 s (the regulations give
+  30 s). Figures move at a realistic speed rather than being lerped over a
+  fixed time.
+- **Re-orienting.** A wheel can go no faster than its outer flank can march,
+  so a battalion in line turns at about 1° per second. Battalions side by side
+  keep the 15.6 m interval, and columns keep deploying distance so they can
+  form line.
+
+The CPU only mirrors frontage and depth (`Formation.footprint_for`), the
+colours' position, and an estimate of how long a manoeuvre takes. Once a
+manoeuvre is over the shader goes back to computing a single formation per
+man. Not yet done: voltigeurs thrown out as a skirmish screen, the charge step,
+and closed columns.
 
 ---
 

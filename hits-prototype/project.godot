@@ -11,9 +11,13 @@ config_version=5
 [application]
 
 config/name="HITS-prototype"
-run/main_scene="res://main.tscn"
+run/main_scene="res://menu.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
+
+[autoload]
+
+GameState="*res://src/game_state.gd"
 
 [display]
 

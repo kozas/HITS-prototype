@@ -2,8 +2,11 @@ extends RefCounted
 ## Procedural low-poly meshes. Vertex data carries animation metadata for the
 ## soldier shader:
 ##   UV.x  = material slot (0 vertex colour, 1 coat, 2 trim, 3 trousers)
-##   UV.y  = part (0 static, 1 left leg, 2 right leg, 3 musket, 4 far card, 5 muzzle flash)
+##   UV.y  = part (see Part); the shader animates legs, musket and flash, and for
+##           staff figures hides the parts a role doesn't carry
 ##   UV2   = rotation pivot (y, z) for animated parts
+
+enum Part { BODY, LEG_L, LEG_R, MUSKET, CARD, FLASH, SWORD, DRUM, HORSE, HORSE_FORE, HORSE_HIND, BICORNE, SHAKO, PACK, EPAULETTES }
 
 const HIP := Vector2(0.86, 0.0)
 const SHOULDER := Vector2(1.38, 0.0)
@@ -93,6 +96,51 @@ static func soldier_mid() -> ArrayMesh:
 	box(st, Vector3(0, 1.68, -0.01), Vector3(0.2, 0.36, 0.21), black)
 	box(st, Vector3(0.27, 1.7, -0.02), Vector3(0.05, 1.6, 0.05), wood, 0, 3, SHOULDER)
 	box(st, Vector3(0.27, 2.2, -0.02), Vector3(0.3, 0.3, 0.3), white, 0, 5, SHOULDER)
+	return _finish(st)
+
+
+## Officers, NCOs, drummers and the mounted chef de bataillon share one mesh;
+## soldier.gdshader (staff mode) shows only the parts that belong to each role.
+static func staff() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var white := lin(0.9, 0.9, 0.86)
+	var black := lin(0.06, 0.06, 0.06)
+	var skin := lin(0.80, 0.62, 0.50)
+	var gold := lin(0.85, 0.68, 0.25)
+	var steel := lin(0.75, 0.75, 0.8)
+	var horse := lin(0.3, 0.17, 0.09)
+	# The man
+	box(st, Vector3(-0.1, 0.47, 0), Vector3(0.14, 0.8, 0.16), white, 3, Part.LEG_L, HIP)
+	box(st, Vector3(0.1, 0.47, 0), Vector3(0.14, 0.8, 0.16), white, 3, Part.LEG_R, HIP)
+	box(st, Vector3(-0.1, 0.06, -0.03), Vector3(0.13, 0.12, 0.24), black, 0, Part.LEG_L, HIP)
+	box(st, Vector3(0.1, 0.06, -0.03), Vector3(0.13, 0.12, 0.24), black, 0, Part.LEG_R, HIP)
+	box(st, Vector3(0, 1.16, 0), Vector3(0.4, 0.62, 0.24), white, 1)
+	box(st, Vector3(0, 1.24, -0.125), Vector3(0.24, 0.36, 0.02), white, 2)
+	box(st, Vector3(0, 0.78, 0.1), Vector3(0.36, 0.2, 0.06), white, 1)
+	box(st, Vector3(-0.255, 1.13, -0.02), Vector3(0.11, 0.56, 0.13), white, 1)
+	box(st, Vector3(0.255, 1.13, -0.02), Vector3(0.11, 0.56, 0.13), white, 1)
+	box(st, Vector3(0, 1.57, -0.01), Vector3(0.17, 0.2, 0.19), skin)
+	# Headgear and kit by role
+	box(st, Vector3(0, 1.78, -0.01), Vector3(0.2, 0.23, 0.21), black, 0, Part.SHAKO)
+	box(st, Vector3(0, 1.73, -0.01), Vector3(0.48, 0.13, 0.16), black, 0, Part.BICORNE)
+	box(st, Vector3(0, 1.2, 0.18), Vector3(0.32, 0.36, 0.12), lin(0.36, 0.25, 0.15), 0, Part.PACK)
+	box(st, Vector3(-0.22, 1.46, 0), Vector3(0.13, 0.04, 0.15), gold, 0, Part.EPAULETTES)
+	box(st, Vector3(0.22, 1.46, 0), Vector3(0.13, 0.04, 0.15), gold, 0, Part.EPAULETTES)
+	box(st, Vector3(0.3, 1.32, -0.1), Vector3(0.025, 0.85, 0.035), steel, 0, Part.SWORD)
+	box(st, Vector3(-0.05, 0.86, -0.24), Vector3(0.36, 0.3, 0.3), gold, 0, Part.DRUM)
+	box(st, Vector3(-0.05, 1.03, -0.24), Vector3(0.38, 0.04, 0.32), lin(0.1, 0.15, 0.5), 0, Part.DRUM)
+	box(st, Vector3(0.27, 1.55, -0.02), Vector3(0.04, 1.2, 0.05), lin(0.30, 0.20, 0.12), 0, Part.MUSKET, SHOULDER)
+	box(st, Vector3(0.27, 2.32, -0.02), Vector3(0.015, 0.34, 0.015), steel, 0, Part.MUSKET, SHOULDER)
+	box(st, Vector3(0.27, 2.2, -0.02), Vector3(0.22, 0.22, 0.22), white, 0, Part.FLASH, SHOULDER)
+	# The chef de bataillon's horse (rider is raised onto it by the shader)
+	box(st, Vector3(0, 1.25, 0), Vector3(0.55, 0.62, 1.7), horse, 0, Part.HORSE)
+	box(st, Vector3(0, 1.72, -0.95), Vector3(0.28, 0.75, 0.34), horse, 0, Part.HORSE, Vector2.ZERO, Basis(Vector3.RIGHT, -0.6))
+	box(st, Vector3(0, 1.98, -1.32), Vector3(0.24, 0.26, 0.58), horse, 0, Part.HORSE, Vector2.ZERO, Basis(Vector3.RIGHT, 0.5))
+	box(st, Vector3(0, 1.3, 0.92), Vector3(0.1, 0.6, 0.12), black, 0, Part.HORSE, Vector2.ZERO, Basis(Vector3.RIGHT, 0.4))
+	for lx in [-0.18, 0.18]:
+		box(st, Vector3(lx, 0.48, -0.62), Vector3(0.13, 0.96, 0.13), horse, 0, Part.HORSE_FORE, Vector2(0.95, -0.62))
+		box(st, Vector3(lx, 0.48, 0.62), Vector3(0.13, 0.96, 0.13), horse, 0, Part.HORSE_HIND, Vector2(0.95, 0.62))
 	return _finish(st)
 
 

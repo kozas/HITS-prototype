@@ -1,32 +1,87 @@
-// Every soldier on the field is drawn by this shader. Soldiers have NO CPU state:
-// position, facing, pose and animation are a pure function of
-//   (formation instance uniforms, INSTANCE_ID = slot index, sim_time, seed).
-// The layout functions below must mirror Formation.footprint_for() in formation.gd.
+// Every man on the field (rank and file, officers, NCOs, drummers, colour guard)
+// is drawn by this shader. None of them has CPU state: position, facing, pose and
+// animation are a pure function of
+//   (battalion instance uniforms, INSTANCE_ID, sim_time, seed).
+//
+// Organisation (French 1791 drill): a battalion is C companies, voltigeurs on the
+// left, grenadiers on the right. Each company is two sections (2nd on the left,
+// 1st on the right) with its captain in the front rank on the right, and its
+// lieutenant and sergeants 2 paces behind the rear rank.
+//
+// Formations place *sections* as rigid blocks; drill moves those blocks. On the
+// word of command each block faces the way it must go, marches there at the quick
+// step and fronts, so companies visibly ploy into column, wheel out into square
+// and so on, rather than men shuffling individually.
+//
+// The geometry must mirror Formation.footprint_for() / colour_pos() in formation.gd.
 shader_type spatial;
 render_mode cull_back, depth_draw_opaque;
 
 #include "res://shaders/terrain_inc.gdshaderinc"
 
 uniform float sim_time = 0.0;
+// false: rank and file (INSTANCE_ID = man). true: officers, NCOs, drummers and
+// colour guard (INSTANCE_ID = staff slot, see staff_pos()).
+uniform bool staff = false;
 
-// x = formation type from, y = formation type to, z = transition start (sim s), w = duration
+// x = formation from, y = formation to, z = time the order was given (sim s), w = unused
 instance uniform vec4 form_state = vec4(1.0, 1.0, -1000.0, 0.0);
-// x = strength, y = ranks when in line, z = seed, w = unused
-instance uniform vec4 form_dims = vec4(600.0, 3.0, 0.0, 0.0);
+// x = strength, y = ranks, z = seed, w = companies
+instance uniform vec4 form_dims = vec4(600.0, 3.0, 0.0, 6.0);
 // x = moving 0/1, y = last volley time, z = rout amount 0..1, w = cadence multiplier
 instance uniform vec4 anim_state = vec4(0.0, -1000.0, 0.0, 1.0);
+// x = time the battalion last started or stopped marching
+instance uniform vec4 drill_state = vec4(-1000.0, 0.0, 0.0, 0.0);
 instance uniform vec4 coat_color = vec4(0.02, 0.03, 0.15, 1.0);
 instance uniform vec4 trim_color = vec4(0.7, 0.7, 0.65, 1.0);
 instance uniform vec4 trouser_color = vec4(0.7, 0.7, 0.65, 1.0);
 
-const float FILE_W = 0.62;
-const float RANK_D = 0.85;
-const int COLUMN_FILES = 48;
-const int MARCH_FILES = 6;
+const int LINE = 0;
+const int COLUMN = 1;
+const int SQUARE = 2;
+const int MARCH = 3;
+
+const float FILE_W = 0.6;    // elbow to elbow
+const float RANK_D = 0.65;   // 0.325 m between ranks, plus the man
+const float SERRE = 1.3;     // officers and sergeants 2 paces behind the rear rank
+const float GUARD_W = 1.2;   // colour guard: 2 files in the centre of the battalion
+const float QUICK = 1.08;    // pas accéléré: 100 paces/min of 0.65 m
+const float FACE_T = 0.8;    // time to face left, right or about
 const vec3 MUZZLE = vec3(0.27, 2.2, -0.02);
+
+// Mesh parts (UV.y), see meshes.gd
+const int P_LEG_L = 1;
+const int P_LEG_R = 2;
+const int P_MUSKET = 3;
+const int P_CARD = 4;
+const int P_FLASH = 5;
+const int P_HORSE_FORE = 9;
+const int P_HORSE_HIND = 10;
+const int P_HORSE_FIRST = 8;
+
+// Staff roles -> visible parts (bit per part)
+const int BODY = (1 << 0) | (1 << 1) | (1 << 2);
+const int MASK_NCO = BODY | (1 << 3) | (1 << 5) | (1 << 12) | (1 << 13);
+const int MASK_OFFICER = BODY | (1 << 6) | (1 << 11) | (1 << 14);
+const int MASK_DRUMMER = BODY | (1 << 7) | (1 << 12) | (1 << 13);
+const int MASK_MOUNTED = BODY | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 14);
 
 varying vec3 v_color;
 varying float v_part;
+
+struct Bn {
+	int r;       // ranks
+	int c;       // companies
+	int pc;      // men per company
+	int nf;      // files per company
+	int hl;      // files in the 2nd (left) section
+	float wc;    // company frontage, including the captain's file
+	float wl;    // 2nd section frontage
+	float wr;    // 1st section frontage
+	float ddiv;  // depth of a company: ranks plus the line of officers
+	float step;  // column of attack: half a company's frontage between divisions
+	float step_s;// open column of sections: full distance
+};
 
 uint hash_u(uint x) {
 	x ^= x >> 16u;
@@ -41,58 +96,6 @@ float hash_f(uint x) {
 	return float(hash_u(x) & 16777215u) / 16777215.0;
 }
 
-// Each returns vec4(local x, local z, yaw, rank). Formation anchor = centre of
-// the front rank; +z is toward the rear.
-vec4 slot_line(int i, int n, int ranks) {
-	int files = max((n + ranks - 1) / ranks, 1);
-	int file = i / ranks;
-	int rank = i % ranks;
-	float x = (float(file) - float(files - 1) * 0.5) * FILE_W;
-	return vec4(x, float(rank) * RANK_D, 0.0, float(rank));
-}
-
-vec4 slot_column(int i, int n) {
-	int cf = max(min(n, COLUMN_FILES), 1);
-	int row = i / cf;
-	int file = i % cf;
-	float x = (float(file) - float(cf - 1) * 0.5) * FILE_W;
-	float z = float(row) * RANK_D + float(row / 3) * 2.4;
-	return vec4(x, z, 0.0, float(row));
-}
-
-vec4 slot_march(int i, int n) {
-	int row = i / MARCH_FILES;
-	int file = i % MARCH_FILES;
-	return vec4((float(file) - float(MARCH_FILES - 1) * 0.5) * 0.7, float(row) * 1.1, 0.0, float(row));
-}
-
-vec4 slot_square(int i, int n) {
-	int per_face = (n + 3) / 4;
-	int fpf = max((per_face + 3) / 4, 1);
-	int face = i % 4;
-	int j = i / 4;
-	int rank = j % 4;
-	int file = j / 4;
-	float half_side = float(fpf) * FILE_W * 0.5 + 4.0 * RANK_D;
-	vec2 p = vec2((float(file) - float(fpf - 1) * 0.5) * FILE_W, -half_side + float(rank) * RANK_D + 0.4);
-	float a = float(face) * PI * 0.5;
-	float c = cos(a);
-	float s = sin(a);
-	vec2 r = vec2(p.x * c - p.y * s, p.x * s + p.y * c);
-	return vec4(r.x, r.y + half_side, a, float(rank));
-}
-
-vec4 slot_for(int type, int i, int n, int ranks) {
-	if (type == 0) {
-		return slot_line(i, n, ranks);
-	} else if (type == 1) {
-		return slot_column(i, n);
-	} else if (type == 2) {
-		return slot_square(i, n);
-	}
-	return slot_march(i, n);
-}
-
 vec2 rot2(vec2 v, float a) {
 	float c = cos(a);
 	float s = sin(a);
@@ -100,49 +103,255 @@ vec2 rot2(vec2 v, float a) {
 }
 
 vec3 rot_x(vec3 v, vec2 pivot, float a) {
-	vec2 p = v.yz - pivot;
-	v.yz = rot2(p, a) + pivot;
+	v.yz = rot2(v.yz - pivot, a) + pivot;
 	return v;
+}
+
+float mix_angle(float a, float b, float t) {
+	return a + (mod(b - a + PI, TAU) - PI) * t;
+}
+
+Bn bn_make(int n, int r, int c) {
+	Bn b;
+	b.r = max(r, 1);
+	b.c = max(c, 2);
+	b.pc = max((n + b.c - 1) / b.c, 1);
+	b.nf = max((b.pc + b.r - 1) / b.r, 1);
+	b.hl = b.nf / 2;
+	b.wc = float(b.nf + 1) * FILE_W;
+	b.wl = float(b.hl) * FILE_W;
+	b.wr = float(b.nf - b.hl) * FILE_W;
+	b.ddiv = float(b.r) * RANK_D + SERRE;
+	b.step = max(0.5 * b.wc, b.ddiv + 2.0);
+	b.step_s = max(b.wr, b.ddiv + 3.0);
+	return b;
+}
+
+// Battalion frontage and depth. The anchor is the centre of the front rank.
+vec2 bn_size(Bn b, int type) {
+	if (type == LINE) {
+		return vec2(float(b.c) * b.wc + GUARD_W, b.ddiv);
+	} else if (type == COLUMN) {
+		return vec2(2.0 * b.wc + GUARD_W, float(b.c / 2 - 1) * b.step + b.ddiv);
+	} else if (type == SQUARE) {
+		return vec2(2.0 * b.wc, 2.0 * float(b.r) * RANK_D + float(max(b.c / 2 - 2, 0)) * b.wc);
+	}
+	return vec2(b.wr, float(2 * b.c - 1) * b.step_s + b.ddiv);
+}
+
+// Company k: front-centre (x, z) and facing, for line, column and square.
+vec3 company_frame(Bn b, int type, int k) {
+	int half_c = b.c / 2;
+	if (type == LINE) {
+		float x = -0.5 * (float(b.c) * b.wc + GUARD_W) + (float(k) + 0.5) * b.wc + (k >= half_c ? GUARD_W : 0.0);
+		return vec3(x, 0.0, 0.0);
+	}
+	// Column by division formed on the centre: the two centre companies (with the
+	// colours between them) lead, the flank companies are last.
+	float side = k < half_c ? -1.0 : 1.0;
+	int d = k < half_c ? half_c - 1 - k : k - half_c;
+	if (type == COLUMN) {
+		return vec3(side * 0.5 * (GUARD_W + b.wc), float(d) * b.step, 0.0);
+	}
+	// (In square the colour guard goes inside, so the faces close up.)
+	float x = side * 0.5 * b.wc;
+	if (d == 0) {
+		return vec3(x, 0.0, 0.0);
+	}
+	// Square from the column: the leading division faces out, the rear division
+	// faces about and the companies between wheel outward to make the sides.
+	float rd = float(b.r) * RANK_D;
+	if (d == half_c - 1) {
+		return vec3(x, 2.0 * rd + float(half_c - 2) * b.wc, PI);
+	}
+	return vec3(side * b.wc, rd + (float(d - 1) + 0.5) * b.wc, side * 0.5 * PI);
+}
+
+// Section s of company k (0 = 2nd/left, 1 = 1st/right): front-centre and facing.
+vec3 section_frame(Bn b, int type, int k, int s) {
+	if (type == MARCH) {
+		// Open column of sections at full distance, right in front: grenadiers lead.
+		int q = (b.c - 1 - k) * 2 + (1 - s);
+		return vec3(0.0, float(q) * b.step_s, 0.0);
+	}
+	vec3 cf = company_frame(b, type, k);
+	float lx = s == 0 ? -0.5 * b.wc + 0.5 * b.wl : -0.5 * b.wc + b.wl + 0.5 * b.wr;
+	return vec3(cf.xy + rot2(vec2(lx, 0.0), cf.z), cf.z);
+}
+
+vec3 in_frame(vec3 f, vec2 local) {
+	return vec3(f.xy + rot2(local, f.z), f.z);
+}
+
+// Staff slot i: 5 per company (captain, left guide, lieutenant, sergeant,
+// drummer), then the battalion staff (chef de bataillon, adjutant-major,
+// sous-adjutant-major, 2 guides généraux, caporal d'encadrement, 6 colour guard).
+int staff_role(Bn b, int i) {
+	if (i < 5 * b.c) {
+		int r = i % 5;
+		return r == 4 ? 2 : (r == 0 || r == 2 ? 1 : 0);
+	}
+	int s = i - 5 * b.c;
+	return s == 0 ? 3 : (s <= 2 ? 1 : 0);
+}
+
+vec3 staff_pos(Bn b, int type, int i, float adv) {
+	vec2 sz = bn_size(b, type);
+	float w = sz.x;
+	float d = sz.y;
+	float back = float(b.r - 1) * RANK_D + SERRE;
+	if (i < 5 * b.c) {
+		int k = i / 5;
+		int r = i % 5;
+		if (r == 4) {
+			// Drummers are drawn from the companies into one band.
+			int cols = max(b.c / 2, 1);
+			vec2 o = vec2((float(k % cols) - 0.5 * float(cols - 1)) * 0.9, float(k / cols) * 0.9);
+			vec2 base = type == LINE ? vec2(0.0, b.ddiv + 8.0)
+				: (type == COLUMN ? vec2(0.0, d + 3.0) : (type == SQUARE ? vec2(0.0, 0.5 * d + 2.0) : vec2(0.0, -7.0)));
+			return vec3(base + o, 0.0);
+		}
+		if (type == MARCH) {
+			// Captain on the right of his leading section, sergeants on the flank.
+			vec3 f1 = section_frame(b, MARCH, k, 1);
+			vec3 f0 = section_frame(b, MARCH, k, 0);
+			if (r == 0) {
+				return vec3(0.5 * b.wr + 0.6, f1.y, 0.0);
+			}
+			return vec3(-0.5 * b.wr - 0.8, (r == 1 ? f1.y : f0.y) + (r == 3 ? 1.3 : 0.0), 0.0);
+		}
+		vec3 cf = company_frame(b, type, k);
+		vec2 l = vec2(0.5 * b.wc - 0.5 * FILE_W, 0.0);
+		if (r == 0 && type == SQUARE) {
+			l = vec2(0.3 * b.wc, back + 1.0);
+		} else if (r > 0) {
+			l = vec2(r == 1 ? -0.5 * b.wc + 0.3 : (r == 2 ? -0.1 * b.wc : 0.25 * b.wc), back);
+		}
+		return in_frame(cf, l);
+	}
+	int s = i - 5 * b.c;
+	float side = s == 3 ? -1.0 : 1.0;
+	if (type == SQUARE) {
+		// Everyone not in the ranks goes inside the square.
+		vec2 inside = s == 0 ? vec2(3.0, -2.0) : (s <= 2 ? vec2(s == 1 ? -5.0 : 5.0, 0.0)
+			: (s <= 4 ? vec2(side * 2.5, 4.0) : (s == 5 ? vec2(-1.5, 4.0) : vec2(0.0, -1.0))));
+		if (s >= 6) {
+			inside += vec2((float((s - 6) / 3) - 0.5) * FILE_W, float((s - 6) % 3) * RANK_D);
+		}
+		return vec3(inside + vec2(0.0, 0.5 * d), 0.0);
+	}
+	if (s == 0) {
+		// Chef de bataillon, mounted: behind the centre of a line, beside a column.
+		return type == LINE ? vec3(0.0, d + 14.0, 0.0) : (type == COLUMN ? vec3(0.5 * w + 9.0, 0.4 * d, 0.0) : vec3(5.0, 4.0, 0.0));
+	}
+	if (s <= 2) {
+		float sx = s == 1 ? -1.0 : 1.0;
+		return type == LINE ? vec3(sx * 0.25 * w, d + 4.0, 0.0) : vec3(sx * (0.5 * w + 3.0), 0.5 * d, 0.0);
+	}
+	if (s <= 4) {
+		// Guides généraux: 4 paces behind the rear rank at the halt, 6 paces in
+		// front of the line once it advances.
+		float halted = type == LINE ? back + 2.6 : 0.5;
+		return vec3(side * (0.5 * w + (type == LINE ? 0.0 : 0.8)), mix(halted, -3.9, adv), 0.0);
+	}
+	if (s == 5) {
+		return vec3(-0.5 * w - 0.7, type == MARCH ? 3.0 : 0.0, 0.0);
+	}
+	// Colour guard: 2 files x 3 ranks round the colours, in the centre of the line
+	// and between the companies of the leading division.
+	int g = s - 6;
+	vec2 base = type == MARCH ? vec2(0.0, 2.0 * b.step_s - 2.5) : vec2(0.0);
+	return vec3(base + vec2((float(g / 3) - 0.5) * FILE_W, float(g % 3) * RANK_D), 0.0);
+}
+
+// Moves one block (section or single figure) from frame fa to frame fb.
+// Returns (x, z, man yaw, marching 0/1).
+vec4 drill(vec3 fa, vec3 fb, vec2 local, float t0, float width) {
+	vec2 dp = fb.xy - fa.xy;
+	float dist = length(dp);
+	float dyaw = mod(fb.z - fa.z + PI, TAU) - PI;
+	float march_t = (dist + abs(dyaw) * width * 0.5) / QUICK;
+	float t = sim_time - t0;
+	if (march_t < 0.05) {
+		vec3 f = t < 0.0 ? fa : fb;
+		return vec4(f.xy + rot2(local, f.z), f.z, 0.0);
+	}
+	float face = dist > 0.5 ? FACE_T : 0.0;
+	float k = clamp((t - face) / march_t, 0.0, 1.0);
+	float by = fa.z + dyaw * k;
+	vec2 p = mix(fa.xy, fb.xy, k) + rot2(local, by);
+	float yaw = by;
+	if (face > 0.0) {
+		// Face towards the new position (by the flank), march, then front.
+		float travel = atan(dp.x, -dp.y);
+		yaw = mix_angle(mix_angle(fa.z, travel, smoothstep(0.0, face, t)), fb.z, smoothstep(face + march_t, 2.0 * face + march_t, t));
+	}
+	return vec4(p, yaw, (t > 0.0 && t < 2.0 * face + march_t) ? 1.0 : 0.0);
 }
 
 void vertex() {
 	int i = INSTANCE_ID;
-	int n = int(form_dims.x + 0.5);
-	int ranks = max(int(form_dims.y + 0.5), 1);
-	uint seed = uint(form_dims.z) * 7919u + uint(i) * 2654435761u;
+	Bn b = bn_make(int(form_dims.x + 0.5), int(form_dims.y + 0.5), int(form_dims.w + 0.5));
+	int fa = int(form_state.x + 0.5);
+	int fb = int(form_state.y + 0.5);
+	uint seed = uint(form_dims.z) * 7919u + uint(i) * 2654435761u + (staff ? 104729u : 0u);
 	float h1 = hash_f(seed);
 	float h2 = hash_f(seed + 1u);
 	float h3 = hash_f(seed + 2u);
 	float h4 = hash_f(seed + 3u);
 
-	// Formation change: each man walks from his old slot to his new one with a random delay.
-	int fa = int(form_state.x + 0.5);
-	int fb = int(form_state.y + 0.5);
-	float tg = form_state.w > 0.0 ? clamp((sim_time - form_state.z) / form_state.w, 0.0, 1.0) : 1.0;
-	float delay = h1 * 0.45;
-	float tl = smoothstep(delay, delay + 0.55, tg);
-	vec4 sa = slot_for(fa, i, n, ranks);
-	vec4 sb = slot_for(fb, i, n, ranks);
-	vec2 pos = mix(sa.xy, sb.xy, tl);
-	float dyaw = mod(sb.z - sa.z + PI, TAU) - PI;
-	float yaw = sa.z + dyaw * tl;
-	float rank = tl < 0.5 ? sa.w : sb.w;
-	float transit = (tl > 0.001 && tl < 0.999) ? 1.0 : 0.0;
+	vec4 pose;
+	float rank = 0.0;
+	int mask = -1;
+	int role = -1;
+	if (!staff) {
+		int k = i / b.pc;
+		int j = i % b.pc;
+		int f = j / b.r;
+		int s = f < b.hl ? 0 : 1;
+		int cnt = s == 0 ? b.hl : b.nf - b.hl;
+		rank = float(j % b.r);
+		vec2 local = vec2((float(f - s * b.hl) + 0.5 - 0.5 * float(cnt)) * FILE_W, rank * RANK_D);
+		vec3 sb = section_frame(b, fb, k, s);
+		if (fa == fb) {
+			// Settled (the common case): one formation, no drill.
+			pose = vec4(in_frame(sb, local), 0.0);
+		} else {
+			float t0 = form_state.z + 1.0 + hash_f(uint(form_dims.z) * 31u + uint(k) * 977u) * 0.8;
+			pose = drill(section_frame(b, fa, k, s), sb, local, t0, float(cnt) * FILE_W);
+		}
+	} else {
+		float since = clamp((sim_time - drill_state.x) / 4.0, 0.0, 1.0);
+		float adv = anim_state.x > 0.5 ? smoothstep(0.0, 1.0, since) : 1.0 - smoothstep(0.0, 1.0, since);
+		role = staff_role(b, i);
+		mask = role == 0 ? MASK_NCO : (role == 1 ? MASK_OFFICER : (role == 2 ? MASK_DRUMMER : MASK_MOUNTED));
+		vec3 sb = staff_pos(b, fb, i, adv);
+		if (fa == fb) {
+			pose = vec4(sb, 0.0);
+		} else {
+			float t0 = form_state.z + 1.0 + (i < 5 * b.c ? hash_f(uint(form_dims.z) * 31u + uint(i / 5) * 977u) * 0.8 : 0.0);
+			pose = drill(staff_pos(b, fa, i, adv), sb, vec2(0.0), t0, 0.0);
+		}
+	}
+	vec2 pos = pose.xy;
+	float yaw = pose.z;
+	float transit = pose.w;
 
 	// Rout: scatter, turn about and run.
 	float rout = anim_state.z;
-	pos += (vec2(h2, h3) - 0.5) * 0.14;
+	pos += (vec2(h2, h3) - 0.5) * 0.12;
 	pos += (vec2(h3, h4) * 2.0 - 1.0) * vec2(22.0, 30.0) * rout;
 	yaw = mix(yaw, PI + (h4 - 0.5) * 1.2, clamp(rout * 4.0, 0.0, 1.0));
 
 	float moving = max(max(anim_state.x, transit), step(0.01, rout));
-	float phase = sim_time * 4.0 * anim_state.w + h1 * 0.4 + rout * h2 * 6.28;
+	float cadence = transit > 0.5 ? QUICK / 0.82 : anim_state.w;
+	float phase = sim_time * 4.0 * cadence + h1 * 0.4 + rout * h2 * 6.28;
 	float swing = sin(phase) * 0.45 * moving;
 	float bob = abs(cos(phase)) * 0.035 * moving;
 
 	// Volley: front two ranks present, then fire raggedly.
 	float vt = anim_state.y;
-	float fire_rank = step(rank, 1.5) * (1.0 - moving);
+	float fire_rank = staff ? 0.0 : step(rank, 1.5) * (1.0 - moving);
 	float present = fire_rank * smoothstep(vt - 1.6, vt - 1.1, sim_time) * (1.0 - smoothstep(vt + 0.3, vt + 0.9, sim_time));
 	float shot_t = vt + h2 * 0.35;
 	float flash = fire_rank * step(shot_t, sim_time) * (1.0 - step(shot_t + 0.09, sim_time));
@@ -150,21 +359,31 @@ void vertex() {
 	int part = int(UV.y + 0.5);
 	vec3 v = VERTEX;
 	vec3 nrm = NORMAL;
-	if (part == 1) {
-		v = rot_x(v, UV2, swing);
-	} else if (part == 2) {
-		v = rot_x(v, UV2, -swing);
-	} else if (part == 3) {
+	bool mounted = role == 3;
+	if (((mask >> part) & 1) == 0) {
+		v = vec3(0.0, -50.0, 0.0);
+	} else if (part == P_LEG_L || part == P_LEG_R) {
+		if (mounted) {
+			v.x += part == P_LEG_L ? -0.2 : 0.2; // astride the horse
+		} else {
+			v = rot_x(v, UV2, part == P_LEG_L ? swing : -swing);
+		}
+	} else if (part == P_HORSE_FORE || part == P_HORSE_HIND) {
+		v = rot_x(v, UV2, part == P_HORSE_FORE ? swing * 0.8 : -swing * 0.8);
+	} else if (part == P_MUSKET) {
 		v = rot_x(v, UV2, -1.42 * present);
 		nrm = rot_x(nrm, vec2(0.0), -1.42 * present);
-	} else if (part == 5) {
+	} else if (part == P_FLASH) {
 		v = MUZZLE + (v - MUZZLE) * flash * 1.6;
 		v = rot_x(v, UV2, -1.42 * present);
-	} else if (part == 4) {
+	} else if (part == P_CARD) {
 		// Far tier card: turn to face the camera about the vertical axis.
 		vec3 cam_local = transpose(mat3(MODEL_MATRIX)) * (INV_VIEW_MATRIX[3].xyz - MODEL_MATRIX[3].xyz);
 		vec2 to_cam = cam_local.xz - pos;
 		yaw = atan(-to_cam.x, to_cam.y);
+	}
+	if (mounted && (part < P_HORSE_FIRST || part > P_HORSE_HIND)) {
+		v.y += 0.75;
 	}
 	v.y += bob;
 	v *= 0.94 + h3 * 0.11;
@@ -194,7 +413,7 @@ void fragment() {
 	ALBEDO = v_color;
 	ROUGHNESS = 0.8;
 	SPECULAR = 0.25;
-	if (v_part > 4.5) {
+	if (abs(v_part - 5.0) < 0.5) {
 		ALBEDO = vec3(1.0, 0.8, 0.4);
 		EMISSION = vec3(1.0, 0.55, 0.15) * 24.0;
 	}

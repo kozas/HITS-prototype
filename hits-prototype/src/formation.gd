@@ -1,15 +1,18 @@
 extends RefCounted
 ## One battalion: the atom of the simulation.
 ## Individual soldiers have no CPU state at all; soldier.gdshader derives every
-## man from these fields. footprint_for() must mirror the shader's slot layouts.
+## man, officer and drummer from these fields. footprint_for() and colour_pos()
+## must mirror the shader's battalion geometry (bn_make / bn_size / staff_pos).
 
 enum Type { LINE, COLUMN, SQUARE, MARCH }
 const TYPE_NAMES := ["Line", "Column", "Square", "March"]
 
-const FILE_W := 0.62
-const RANK_D := 0.85
-const COLUMN_FILES := 48
-const MARCH_FILES := 6
+const FILE_W := 0.6
+const RANK_D := 0.65
+const SERRE := 1.3
+const GUARD_W := 1.2
+const ORDINARY_STEP := 0.82  # pas ordinaire: 76 paces/min of 0.65 m
+const QUICK_STEP := 1.08     # pas accéléré: 100 paces/min
 
 var id := 0
 var army := 0
@@ -18,6 +21,7 @@ var label := ""
 var strength := 600
 var max_strength := 600
 var ranks := 3
+var companies := 6
 
 # Anchor = centre of the front rank. Facing is a Godot yaw (forward = -Z rotated).
 var pos := Vector2.ZERO
@@ -36,6 +40,7 @@ var target_facing := 0.0
 var target_ftype: int = Type.LINE
 var march_ftype: int = Type.COLUMN
 var moving := false
+var moving_since := -1000.0  # guides step out ahead when the battalion advances
 var slope_factor := 1.0
 
 var morale := 1.0
@@ -62,7 +67,11 @@ var fp := Vector2.ONE  # cached footprint; refresh_shape() when type or strength
 
 
 func refresh_shape() -> void:
-	fp = footprint_for(ftype, strength, ranks)
+	fp = footprint_as(ftype)
+
+
+func footprint_as(type: int) -> Vector2:
+	return footprint_for(type, strength, ranks, companies)
 
 
 func forward() -> Vector2:
@@ -97,73 +106,77 @@ func begin_transition(new_type: int, t: float) -> void:
 	ftype = new_type
 	refresh_shape()
 	trans_start = t
-	trans_dur = transition_time(ftype_from, new_type)
+	trans_dur = transition_time(ftype_from, ftype)
 	render_dirty = true
 
 
+## Lines advance at the ordinary step; columns manoeuvre at the quick step.
 func speed() -> float:
 	if routing:
 		return 2.4
 	match ftype:
 		Type.LINE:
-			return 0.7
-		Type.COLUMN:
-			return 1.0
-		Type.MARCH:
-			return 1.25
+			return ORDINARY_STEP
+		Type.COLUMN, Type.MARCH:
+			return QUICK_STEP
 		_:
 			return 0.15
 
 
+## A wheel can go no faster than the outer flank can march at the quick step:
+## about 1 degree a second for a battalion in line.
 func turn_rate() -> float:
-	match ftype:
-		Type.LINE:
-			return deg_to_rad(2.5)
-		Type.COLUMN:
-			return deg_to_rad(10.0)
-		Type.MARCH:
-			return deg_to_rad(15.0)
-		_:
-			return deg_to_rad(4.0)
+	return minf(QUICK_STEP / maxf(fp.x * 0.5, 1.0), deg_to_rad(15.0))
 
 
-## Muskets that can bear on a target to the front.
+## Muskets that can bear on a target to the front (front two ranks).
 func firing_muskets() -> int:
-	var fp := footprint()
 	match ftype:
-		Type.LINE:
+		Type.LINE, Type.COLUMN:
 			return mini(strength, int(fp.x / FILE_W) * 2)
-		Type.COLUMN:
-			return mini(strength, COLUMN_FILES * 2)
 		Type.SQUARE:
 			return strength / 8
 		_:
 			return 0
 
 
-static func transition_time(a: int, b: int) -> float:
-	if b == Type.SQUARE:
-		return 25.0 if a == Type.COLUMN else 50.0
-	if a == Type.MARCH or b == Type.MARCH:
-		return 35.0
-	return 45.0
+## How long a change of formation takes: the farthest section marches from its
+## old place to its new one at the quick step (as the shader animates it).
+func transition_time(a: int, b: int) -> float:
+	var fa := footprint_as(a)
+	var fb := footprint_as(b)
+	return 3.0 + Vector2(absf(fa.x - fb.x) * 0.5, maxf(fa.y, fb.y)).length() / QUICK_STEP
 
 
-## (width, depth) in metres. Mirrors soldier.gdshader slot_* functions.
-static func footprint_for(type: int, n: int, rk: int) -> Vector2:
-	n = maxi(n, 1)
+## (width, depth) in metres; the anchor is the centre of the front rank.
+## Mirrors bn_make / bn_size in soldier.gdshader.
+static func footprint_for(type: int, n: int, rk: int, c: int) -> Vector2:
+	var g := _geom(n, rk, c)
 	match type:
 		Type.LINE:
-			var files := (n + rk - 1) / rk
-			return Vector2(files * FILE_W, rk * RANK_D)
+			return Vector2(c * g.x + GUARD_W, g.y)
 		Type.COLUMN:
-			var cf := mini(n, COLUMN_FILES)
-			var rows := (n + cf - 1) / cf
-			return Vector2(cf * FILE_W, rows * RANK_D + (rows / 3) * 2.4)
+			return Vector2(2.0 * g.x + GUARD_W, (c / 2 - 1) * maxf(0.5 * g.x, g.y + 2.0) + g.y)
 		Type.SQUARE:
-			var fpf := maxi(((n + 3) / 4 + 3) / 4, 1)
-			var side := fpf * FILE_W + 8.0 * RANK_D
-			return Vector2(side, side)
+			return Vector2(2.0 * g.x, 2.0 * rk * RANK_D + maxi(c / 2 - 2, 0) * g.x)
 		_:
-			var rows := (n + MARCH_FILES - 1) / MARCH_FILES
-			return Vector2(MARCH_FILES * 0.7, rows * 1.1)
+			return Vector2(g.z, (2 * c - 1) * maxf(g.z, g.y + 3.0) + g.y)
+
+
+## Where the colours stand (local x, z), in the middle of the colour guard.
+func colour_pos(type: int) -> Vector2:
+	var g := _geom(strength, ranks, companies)
+	match type:
+		Type.SQUARE:
+			return Vector2(0, footprint_as(type).y * 0.5 - 1.0 + RANK_D)
+		Type.MARCH:
+			return Vector2(0, 2.0 * maxf(g.z, g.y + 3.0) - 2.5 + RANK_D)
+		_:
+			return Vector2(0, RANK_D)
+
+
+## (company frontage incl. the captain's file, company depth, 1st section frontage)
+static func _geom(n: int, rk: int, c: int) -> Vector3:
+	var pc := maxi((maxi(n, 1) + c - 1) / c, 1)
+	var nf := maxi((pc + rk - 1) / rk, 1)
+	return Vector3((nf + 1) * FILE_W, rk * RANK_D + SERRE, (nf - nf / 2) * FILE_W)
