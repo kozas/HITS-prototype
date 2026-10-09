@@ -79,15 +79,19 @@ func _ready() -> void:
 	var t0 := Time.get_ticks_msec()
 	terrain = Terrain.new()
 	add_child(terrain)
-	terrain.generate(1815)
+	var corps := scenario == GS.Scenario.CORPS_COMMAND
+	terrain.generate(Terrain.MAPS["hill" if corps else "ridges"])
 
 	sim = BattleSim.new(terrain)
 	var site := Vector2.ZERO
-	if scenario == GS.Scenario.BRIGADE_CONTACT:
-		site = _pick_contact_site()
-		sim.deploy_contact(site, men, CONTACT_GAP)
-	else:
-		sim.deploy(bns_per_side, men, front_z)
+	match scenario:
+		GS.Scenario.BRIGADE_CONTACT:
+			site = _pick_contact_site()
+			sim.deploy_contact(site, men, CONTACT_GAP)
+		GS.Scenario.CORPS_COMMAND:
+			sim.deploy_corps(men)
+		_:
+			sim.deploy(bns_per_side, men, front_z)
 	sim._rebuild_grid()
 
 	renderer = FormationRenderer.new()
@@ -119,6 +123,14 @@ func _ready() -> void:
 		player.setup(terrain, spot, atan2(-look.x, -look.y))
 		var fc := Vector2(site.x + 420.0, site.y + 260.0)
 		free_cam.place(Vector3(fc.x, terrain.height(fc.x, fc.y) + 70.0, fc.y), deg_to_rad(50.0), -0.3)
+	elif corps:
+		# On the hill: the summit, or just forward of it if that sees more.
+		var hill: Array = Terrain.MAPS.hill.hills[0]
+		var top := Vector2(hill[0], hill[1])
+		var spot := _best_viewpoint([top, top + Vector2(0, -60), top + Vector2(0, -120), top + Vector2(60, -90), top + Vector2(-60, -90)])
+		var look := Vector2(0, -300) - spot
+		player.setup(terrain, spot, atan2(-look.x, -look.y))
+		free_cam.place(Vector3(top.x, terrain.height(top.x, top.y) + 160.0, top.y + 250.0), 0.0, -0.3)
 	else:
 		_place_enemy_hq()
 		# Start where the general can see the most of both armies.
@@ -150,6 +162,10 @@ func _ready() -> void:
 		_capture_mouse()
 		if scenario == GS.Scenario.BRIGADE_CONTACT:
 			hud.toast("11:00. Your brigade is advancing on the Allied line, %d m ahead." % int(CONTACT_GAP))
+		elif corps:
+			map.focus(Vector2(0, 200), 1.8)
+			hud.toast("11:00. %s is halted below your hill. The enemy holds the ridge to the north." % sim.armies[PLAYER_ARMY].subordinates[0].title)
+			hud.toast("O: order of battle   M: map and orders   T: telescope")
 		else:
 			hud.toast("11:00. The armies are deploying. Press M for the map.")
 

@@ -6,13 +6,29 @@ const N := 512
 const SPACING := 12.0
 const SIZE := (N - 1) * SPACING
 
+## Maps: rolling noise ("relief" and "detail" metres) plus hand-placed features.
+##   ridges: [z, height, width] running east-west (mirror_z: one each side of z = 0)
+##   hills:  [x, z, height, radius]
+##   valley: [depth, width] along z = 0
+const MAPS := {
+	# Two low ridges with a shallow valley between: each army starts on one,
+	# giving reverse slopes to hide behind (Waterloo-style).
+	"ridges": {"seed": 1815, "relief": 38.0, "detail": 6.0, "mirror_z": true,
+		"ridges": [[900.0, 16.0, 400.0]], "hills": [], "valley": [8.0, 420.0]},
+	# Gentler country with a commanding hill behind the French centre and a
+	# ridge to the north for the enemy (Corps Command).
+	"hill": {"seed": 1806, "relief": 16.0, "detail": 3.0, "mirror_z": false,
+		"ridges": [[-880.0, 16.0, 360.0]], "hills": [[-250.0, 950.0, 45.0, 300.0]], "valley": [5.0, 380.0]},
+}
+
 var heights := PackedFloat32Array()
 var heightmap: ImageTexture
 var material: ShaderMaterial
 var detail_noise: NoiseTexture2D
 
 
-func generate(seed_value: int) -> void:
+func generate(map: Dictionary) -> void:
+	var seed_value: int = map.seed
 	var base := FastNoiseLite.new()
 	base.seed = seed_value
 	base.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
@@ -23,19 +39,24 @@ func generate(seed_value: int) -> void:
 	detail.frequency = 1.0 / 320.0
 	detail.fractal_octaves = 2
 
+	var relief: float = map.relief
+	var fine: float = map.detail
+	var mirror: bool = map.mirror_z
+	var valley: Array = map.valley
 	heights.resize(N * N)
 	var half := SIZE * 0.5
 	for iz in N:
 		var z := iz * SPACING - half
+		var rz := absf(z) if mirror else z
 		for ix in N:
 			var x := ix * SPACING - half
-			var h := base.get_noise_2d(x, z) * 38.0 + detail.get_noise_2d(x, z) * 6.0
-			# Two low ridges with a shallow valley between: each army starts on one,
-			# giving reverse slopes to hide behind (Waterloo-style).
-			var az := absf(z)
-			h += 16.0 * exp(-pow((az - 900.0) / 400.0, 2.0))
-			h -= 8.0 * exp(-pow(z / 420.0, 2.0))
-			var edge := maxf(absf(x), az)
+			var h := base.get_noise_2d(x, z) * relief + detail.get_noise_2d(x, z) * fine
+			for r in map.ridges:
+				h += r[1] * exp(-pow((rz - r[0]) / r[2], 2.0))
+			for hill in map.hills:
+				h += hill[2] * exp(-(Vector2(x - hill[0], z - hill[1]).length_squared()) / (hill[3] * hill[3]))
+			h -= valley[0] * exp(-pow(z / valley[1], 2.0))
+			var edge := maxf(absf(x), absf(z))
 			h *= smoothstep(half, half - 700.0, edge)
 			heights[iz * N + ix] = h
 

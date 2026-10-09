@@ -8,7 +8,7 @@ const BattleSim = preload("res://src/battle_sim.gd")
 
 func _init() -> void:
 	var terrain = Terrain.new()
-	terrain.generate(1815)
+	terrain.generate(Terrain.MAPS.ridges)
 	var sim = BattleSim.new(terrain)
 	sim.deploy(160, 600, 450.0)
 	sim.ai_enabled = [true, true]

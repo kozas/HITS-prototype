@@ -1,7 +1,7 @@
 extends Node
 ## Autoload: carries the scenario chosen in the main menu into battle.tscn.
 
-enum Scenario { BENCHMARK, BRIGADE_CONTACT }
+enum Scenario { BENCHMARK, BRIGADE_CONTACT, CORPS_COMMAND }
 
 const BATTLE_SCENE := "res://battle.tscn"
 const MENU_SCENE := "res://menu.tscn"

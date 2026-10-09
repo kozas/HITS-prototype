@@ -15,6 +15,17 @@ The game opens on a main menu with two scenarios:
   centre of the map. The lines come into musket range after about 30 s (first
   volley at about 32 s), and the firefight runs on from there. You start just
   behind the right of your brigade with both lines in view.
+- **Corps command:** a new map with a prominent hill (about 45 m), where you
+  start on the summit. Your corps of four divisions (32 battalions) is halted
+  below you, drawn up in the manner of the period:
+  - 1st Division deployed in line as the first line, about 1.1 km of front.
+  - 2nd Division about 220 m behind in battalion columns at deploying distance,
+    posted behind the first line's intervals so it can pass through them.
+  - 3rd and 4th Divisions in route column on two roads to the rear.
+  
+  An Anglo-Allied corps of two divisions holds the ridge 1.1 km to the north:
+  one division in line on the crest, the other in columns on the reverse slope.
+  Everyone is halted and waiting for your orders.
 - **Benchmark:** the full stress test. 192,000 men (320 battalions of 600) on a
   6 × 6 km field, with every man drawn. Battalions march, change formation, fire
   volleys, take casualties, rout and leave their dead on the field. You ride around
@@ -31,7 +42,7 @@ C:/Godot/Godot_v4.6.1-stable_win64.exe --path hits-prototype
 ```
 
 Command-line options (after `--`):
-- `--scenario=contact` or `--scenario=benchmark` skips the menu.
+- `--scenario=contact`, `--scenario=corps` or `--scenario=benchmark` skips the menu.
 - `--bns=N` sets battalions per side in the benchmark (default 160).
 - `--men=N` sets men per battalion (default 600).
 - `--autoshot=DIR` saves timed screenshots and quits (a dev aid).
@@ -102,6 +113,9 @@ double-click jumping to the map):
 C:/Godot/Godot_v4.6.1-stable_win64_console.exe --path hits-prototype --resolution 1600x900 --script res://tools/ui_shots.gd -- --out=shots
 ```
 
+Add `--scenario=corps` to review Corps command as it starts. The run then ends
+with an overhead view of the deployment.
+
 ### Code map
 
 | File | Role |
@@ -120,6 +134,6 @@ C:/Godot/Godot_v4.6.1-stable_win64_console.exe --path hits-prototype --resolutio
 | `src/smoke.gd` + `shaders/smoke.gdshader` | Stateless smoke and dust ring buffer |
 | `src/corpses.gd` | The fallen, 1:1, in spatial chunks |
 | `src/couriers.gd` | Riders that carry orders and can be shot |
-| `src/terrain.gd` | Heightmap shared by GPU and CPU, LOS raymarch |
+| `src/terrain.gd` | Heightmap shared by GPU and CPU, LOS raymarch, map definitions (`MAPS`: "ridges", "hill") |
 | `src/map_overlay.gd` + `shaders/map_relief.gdshader` | The general's map (own troops, enemy at last-seen), zoomable, with relief and contours drawn from the heightmap |
 | `src/player_rider.gd` + `shaders/scope.gdshader` | The general in the saddle, and his telescope |

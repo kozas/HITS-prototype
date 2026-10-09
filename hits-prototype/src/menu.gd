@@ -2,6 +2,7 @@ extends Control
 ## Main menu: pick a scenario. Command-line shortcuts skip the menu:
 ##   -- --bench               scripted benchmark run
 ##   -- --scenario=contact    straight into Brigade contact
+##   -- --scenario=corps      straight into Corps command
 ##   -- --scenario=benchmark  straight into the full battle
 
 const GS = preload("res://src/game_state.gd")
@@ -11,6 +12,7 @@ const DIM := Color(0.68, 0.64, 0.54)
 
 const ITEMS := [
 	["Brigade contact", "A French brigade advances in line on an Allied brigade.\nMusketry range in about 30 seconds.", GS.Scenario.BRIGADE_CONTACT],
+	["Corps command", "Your corps of four divisions, halted below a commanding hill.\nThe enemy holds the ridge to the north. Everyone awaits your orders.", GS.Scenario.CORPS_COMMAND],
 	["Benchmark", "The full 1:1 stress test: 192,000 men in 320 battalions\non a 6 km field, with couriers and the map.", GS.Scenario.BENCHMARK],
 ]
 
@@ -23,6 +25,9 @@ func _ready() -> void:
 			return
 		if a == "--scenario=contact":
 			GameState.start.call_deferred(GameState.Scenario.BRIGADE_CONTACT)
+			return
+		if a == "--scenario=corps":
+			GameState.start.call_deferred(GameState.Scenario.CORPS_COMMAND)
 			return
 	_build()
 	for a in OS.get_cmdline_user_args():

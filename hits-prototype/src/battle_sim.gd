@@ -113,6 +113,45 @@ func deploy_contact(site: Vector2, men: int, gap: float) -> void:
 	ai_enabled = [false, false]
 
 
+## Corps Command (map "hill"): a French corps of four divisions facing an
+## Anglo-Allied corps of two on the ridge to the north, everyone halted. Drawn up
+## in the usual manner of the period:
+##   1st Division  first line: both brigades deployed in line
+##   2nd Division  second line, ~220 m behind: battalion columns at deploying
+##                 distance, posted behind the intervals of the first line (shifted
+##                 71 m, half a battalion's frontage plus half an interval) so
+##                 they can pass through it
+##   3rd, 4th Div  in route column on two roads to the rear, either side of the hill
+## The enemy holds the crest in line, his second division in columns on the
+## reverse slope, out of sight. Positions are the centre of each brigade's front
+## (the head of a march column); facing north is yaw 0.
+const CORPS_SETUP := [
+	[[Vector2(-286, 250), T.LINE], [Vector2(286, 250), T.LINE],
+	[Vector2(-215, 470), T.COLUMN], [Vector2(357, 470), T.COLUMN],
+	[Vector2(-760, 1150), T.MARCH], [Vector2(-760, 1700), T.MARCH],
+	[Vector2(700, 1150), T.MARCH], [Vector2(700, 1700), T.MARCH]],
+	[[Vector2(406, -880), T.LINE], [Vector2(-406, -880), T.LINE],
+	[Vector2(406, -1180), T.COLUMN], [Vector2(-406, -1180), T.COLUMN]],
+]
+const CORPS_HQ := [Vector2(-250, 950), Vector2(0, -1600)]
+
+
+func deploy_corps(men: int) -> void:
+	for army in 2:
+		var yaw := 0.0 if army == 0 else PI
+		for spec in CORPS_SETUP[army]:
+			var b := _add_brigade(army, 0)
+			for k in 4:
+				_add_battalion(b, men, spec[0], yaw, spec[1])
+			var slots := _brigade_slots(b.battalions, spec[0], yaw, spec[1])
+			for k in slots.size():
+				b.battalions[k].pos = slots[k]
+				b.battalions[k].prev_pos = slots[k]
+		hq[army] = CORPS_HQ[army]
+		_organise(army)
+	ai_enabled = [false, false]
+
+
 ## Brigades are named after their général, as was the custom.
 func _add_brigade(army: int, row: int) -> Brigade:
 	var b := Brigade.new()
@@ -327,22 +366,12 @@ func _apply_order(b, o: Dictionary) -> void:
 	var facing: float = o.facing
 	var right := Vector2(cos(facing), -sin(facing))
 	bns.sort_custom(func(a, c): return a.pos.dot(right) < c.pos.dot(right))
-	# Columns keep deploying distance (the frontage of the line they would form)
-	# so each battalion can deploy without crowding its neighbours.
-	var gap := BN_INTERVAL
-	var widths := []
-	var total := gap * (bns.size() - 1)
-	for f in bns:
-		var w: float = f.footprint_as(ft if ft == T.MARCH else T.LINE).x
-		widths.append(w)
-		total += w
-	var x := -total * 0.5
+	var slots := _brigade_slots(bns, o.dest, facing, ft)
 	for k in bns.size():
 		var f = bns[k]
 		if f.routing:
 			continue
-		f.target_pos = o.dest + right * (x + widths[k] * 0.5)
-		x += widths[k] + gap
+		f.target_pos = slots[k]
 		f.target_facing = facing
 		f.target_ftype = ft
 		f.has_target = true
@@ -352,6 +381,33 @@ func _apply_order(b, o: Dictionary) -> void:
 		b.current.status = "superseded"
 	o.status = "executing"
 	b.current = o
+
+
+## Where each battalion of a brigade stands (its anchor) in formation `ft`, with
+## `dest` the centre of the brigade's front. Line and columns are abreast; columns
+## keep deploying distance (the frontage of the line they would form) so each can
+## deploy without crowding its neighbours. A march column is one battalion
+## behind another, with `dest` at its head.
+func _brigade_slots(bns: Array, dest: Vector2, facing: float, ft: int) -> Array:
+	var right := Vector2(cos(facing), -sin(facing))
+	var back := Vector2(sin(facing), cos(facing))
+	var out := []
+	if ft == T.MARCH:
+		var depth := 0.0
+		for f in bns:
+			out.append(dest + back * depth)
+			depth += f.footprint_as(T.MARCH).y + 20.0
+		return out
+	var widths := []
+	var total := BN_INTERVAL * (bns.size() - 1)
+	for f in bns:
+		widths.append(f.footprint_as(T.LINE).x)
+		total += widths[-1]
+	var x := -total * 0.5
+	for k in bns.size():
+		out.append(dest + right * (x + widths[k] * 0.5))
+		x += widths[k] + BN_INTERVAL
+	return out
 
 
 func _move(f: Formation, dt: float) -> void:

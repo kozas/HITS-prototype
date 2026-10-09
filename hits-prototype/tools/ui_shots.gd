@@ -1,7 +1,8 @@
 extends SceneTree
-## UI review: saddle view, telescope, map (zoomed out and in) and order of
-## battle, on the full battle after the armies have deployed. Needs a window:
-##   godot --path hits-prototype --resolution 1600x900 --script res://tools/ui_shots.gd -- --out=DIR
+## UI review: saddle view, telescope, map (zoomed out and in), order of battle
+## and an overhead view. The full battle runs 10 minutes first so the armies
+## deploy; Corps command (--scenario=corps) is shot as it starts. Needs a window:
+##   godot --path hits-prototype --resolution 1600x900 --script res://tools/ui_shots.gd -- --out=DIR [--scenario=corps]
 
 var battle
 var out := "."
@@ -9,26 +10,39 @@ var frame := 0
 var steps: Array
 var _shot_in := 0
 var _shot_name := ""
+var _corps := false
 
 
 func _initialize() -> void:
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--out="):
 			out = a.get_slice("=", 1)
-	root.get_node("GameState").scenario = 0  # BENCHMARK
+		elif a == "--scenario=corps":
+			_corps = true
+	root.get_node("GameState").scenario = 2 if _corps else 0  # CORPS_COMMAND / BENCHMARK
 	battle = load("res://battle.tscn").instantiate()
 	root.add_child(battle)
-	# [sim seconds, action, screenshot name or ""]
+	var t := 3.0 if _corps else 600.0
+	var map_zoom := Vector2(0, 600) if _corps else Vector2(0, 150)
+	# [sim seconds, action, screenshot name]
 	steps = [
-		[600.0, func(): battle.time_scale_idx = 1, "01_saddle"],
-		[601.0, func(): battle._set_telescope(true), "02_telescope_x10"],
-		[602.0, func(): battle.player.change_magnification(2.0), "03_telescope_x20"],
-		[603.0, func(): battle._open_overlay(battle.map), "04_map"],
-		[604.0, func(): battle.map.focus(Vector2(0, 150), 6.0), "05_map_zoomed"],
-		[605.0, func(): _open_oob(), "06_oob"],
-		[606.0, func(): _show_enemy_oob(), "07_oob_enemy"],
-		[607.0, func(): _activate_first_brigade(), "08_oob_to_map"],
+		[t, func(): battle.time_scale_idx = 1, "01_saddle"],
+		[t + 1.0, func(): battle._set_telescope(true), "02_telescope_x10"],
+		[t + 2.0, func(): battle.player.change_magnification(2.0), "03_telescope_x20"],
+		[t + 3.0, func(): battle._open_overlay(battle.map), "04_map"],
+		[t + 4.0, func(): battle.map.focus(map_zoom, 3.0 if _corps else 6.0), "05_map_zoomed"],
+		[t + 5.0, func(): _open_oob(), "06_oob"],
+		[t + 6.0, func(): _show_enemy_oob(), "07_oob_enemy"],
+		[t + 7.0, func(): _activate_first_brigade(), "08_oob_to_map"],
+		[t + 8.0, func(): _overhead(), "09_overhead"],
 	]
+
+
+## Free camera high behind the player's army, looking over it towards the enemy.
+func _overhead() -> void:
+	battle._open_overlay(null)
+	battle._set_free_cam(true)
+	battle.free_cam.place(Vector3(250, 520, 2300), 0.0, -0.42)
 
 
 ## Fold your own army and open the enemy's (only what has been seen).
