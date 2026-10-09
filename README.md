@@ -43,16 +43,18 @@ Command-line options (after `--`):
 | Mouse | look |
 | W / Shift+W / Ctrl+W | trot / gallop / walk |
 | S, A/D | back up, sidestep |
-| M or Tab | map. LMB selects a brigade; RMB-drag from the destination sets the facing; 1–4 picks Line / Column / Square / March. Releasing sends a courier |
+| T | telescope: the general halts and raises his glass (4–20×, mouse wheel); detail follows the magnification |
+| M or Tab | map. Wheel zooms at the cursor and dragging (left on empty ground, or middle) pans. LMB selects a brigade; RMB-drag from the destination sets the facing; 1–4 picks Line / Column / Square / March. Releasing sends a courier |
+| O | order of battle: Army > Corps > Division > Brigade > Battalion, with commanders, strength and situation. The enemy shows only as far as he has been seen. Double-click a unit to find it on the map |
 | = / - | time scale (×0.5 … ×16) |
 | P | pause |
 | F | free camera (WASD, Q/E, Shift) |
 | G | AI autopilot for your own army |
 | L | cycle LOD mode (auto / force NEAR / MID / FAR / RIBBON) |
-| O | toggle line-of-sight culling |
+| V | toggle line-of-sight culling |
 | K | chaos: every battalion changes formation at once |
 | H | toggle help |
-| Esc | close the map, or open the pause menu (Resume / Main menu) |
+| Esc | close the map, order of battle or telescope, otherwise open the pause menu (Resume / Main menu) |
 
 ### Benchmark
 
@@ -91,6 +93,15 @@ C:/Godot/Godot_v4.6.1-stable_win64_console.exe --path hits-prototype --resolutio
 
 Use `--bn=1` for a French battalion and `--bn=5` for a British one.
 
+UI review also needs a window. It runs the full battle for 10 minutes, then
+captures the saddle view, the telescope at 10× and 20×, the map zoomed out and
+in, and the order of battle (own army, the enemy as observed, and a
+double-click jumping to the map):
+
+```bash
+C:/Godot/Godot_v4.6.1-stable_win64_console.exe --path hits-prototype --resolution 1600x900 --script res://tools/ui_shots.gd -- --out=shots
+```
+
 ### Code map
 
 | File | Role |
@@ -99,6 +110,9 @@ Use `--bn=1` for a French battalion and `--bn=5` for a British one.
 | `battle.tscn` + `src/battle.gd` | Battle scene: world setup per scenario, frame loop, input, benchmark |
 | `src/game_state.gd` | Autoload carrying the chosen scenario between scenes |
 | `src/formation.gd` | Battalion state. The atom of the sim |
+| `src/command.gd`, `src/brigade.gd` | Chain of command: army, corps and division HQs; brigades hold battalions and orders |
+| `src/oob_names.gd` | Unit titles, numbering and (invented) commanders for the order of battle |
+| `src/oob_view.gd` | Order-of-battle viewer (O) |
 | `src/battle_sim.gd` | 10 Hz fixed-tick sim: orders, movement, musketry, morale, AI |
 | `src/formation_renderer.gd` | Per-battalion LOD tier, LOS culling, event-driven uniforms |
 | `shaders/soldier.gdshader` | Every man, officer and drummer: companies, formations, drill, marching, volleys, rout |
@@ -107,4 +121,5 @@ Use `--bn=1` for a French battalion and `--bn=5` for a British one.
 | `src/corpses.gd` | The fallen, 1:1, in spatial chunks |
 | `src/couriers.gd` | Riders that carry orders and can be shot |
 | `src/terrain.gd` | Heightmap shared by GPU and CPU, LOS raymarch |
-| `src/map_overlay.gd` | The general's map (own troops, enemy at last-seen) |
+| `src/map_overlay.gd` + `shaders/map_relief.gdshader` | The general's map (own troops, enemy at last-seen), zoomable, with relief and contours drawn from the heightmap |
+| `src/player_rider.gd` + `shaders/scope.gdshader` | The general in the saddle, and his telescope |

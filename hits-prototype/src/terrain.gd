@@ -115,24 +115,3 @@ func line_of_sight(from: Vector3, to: Vector3, steps := 16) -> bool:
 		if height(p.x, p.z) > p.y + 0.3:
 			return false
 	return true
-
-
-## Shaded relief image for the map overlay.
-func make_relief(res: int) -> ImageTexture:
-	var img := Image.create(res, res, false, Image.FORMAT_RGB8)
-	var step := SIZE / res
-	var half := SIZE * 0.5
-	for py in res:
-		for px in res:
-			var x := px * step - half
-			var z := py * step - half
-			var h := height(x, z)
-			var hx := height(x + step, z) - height(x - step, z)
-			var hz := height(x, z + step) - height(x, z - step)
-			var shade := clampf(0.75 - (hx + hz) * 0.06, 0.35, 1.0)
-			var t := clampf((h + 15.0) / 45.0, 0.0, 1.0)
-			var c := Color(0.82, 0.78, 0.62).lerp(Color(0.62, 0.55, 0.40), t) * shade
-			if fmod(h + 100.0, 5.0) < 0.35:
-				c = c.darkened(0.18)
-			img.set_pixel(px, py, c)
-	return ImageTexture.create_from_image(img)

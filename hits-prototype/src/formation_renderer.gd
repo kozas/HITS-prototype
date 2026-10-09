@@ -162,7 +162,10 @@ func _create(f, b) -> void:
 	entries.append(e)
 
 
-func update(cam: Vector3, alpha: float, time: float) -> void:
+## lod_scale > 1 when looking through the telescope: things inside its field of
+## view (direction view_dir, cos of the half-angle view_cos) look that much
+## closer, so they get the detail tier of the apparent distance.
+func update(cam: Vector3, alpha: float, time: float, lod_scale := 1.0, view_dir := Vector3.FORWARD, view_cos := 1.0) -> void:
 	for k in 5:
 		tier_men[k] = 0
 		tier_bns[k] = 0
@@ -189,7 +192,10 @@ func update(cam: Vector3, alpha: float, time: float) -> void:
 		var dx: float = f.cpos.x - cam.x
 		var dz: float = f.cpos.y - cam.z
 		var dy: float = e.root.position.y - cam.y
-		var tier := _pick_tier(sqrt(dx * dx + dy * dy + dz * dz), e.tier)
+		var d := sqrt(dx * dx + dy * dy + dz * dz)
+		if lod_scale > 1.0 and dx * view_dir.x + dy * view_dir.y + dz * view_dir.z > view_cos * d:
+			d /= lod_scale
+		var tier := _pick_tier(d, e.tier)
 		if los_enabled and not f.los_visible:
 			tier = Tier.HIDDEN
 		if tier != e.tier:

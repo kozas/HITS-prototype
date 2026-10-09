@@ -13,6 +13,7 @@ const Couriers = preload("res://src/couriers.gd")
 const PlayerRider = preload("res://src/player_rider.gd")
 const FreeCam = preload("res://src/free_cam.gd")
 const MapOverlay = preload("res://src/map_overlay.gd")
+const OobView = preload("res://src/oob_view.gd")
 const Hud = preload("res://src/hud.gd")
 const Meshes = preload("res://src/meshes.gd")
 const Formation = preload("res://src/formation.gd")
@@ -40,6 +41,7 @@ var couriers
 var player
 var free_cam
 var map
+var oob
 var hud
 
 var bns_per_side := 160
@@ -119,7 +121,12 @@ func _ready() -> void:
 		free_cam.place(Vector3(fc.x, terrain.height(fc.x, fc.y) + 70.0, fc.y), deg_to_rad(50.0), -0.3)
 	else:
 		_place_enemy_hq()
-		player.setup(terrain, Vector2(120, front_z + 380), 0.0)
+		# Start where the general can see the most of both armies.
+		var spots := []
+		for dz in [-150.0, 0.0, 150.0, 380.0]:
+			for x in [0.0, 300.0, -300.0, 700.0, -700.0]:
+				spots.append(Vector2(x + 60.0, front_z + dz))
+		player.setup(terrain, _best_viewpoint(spots), 0.0)
 		free_cam.place(Vector3(0, 420, front_z + 1500), 0.0, -0.3)
 	player.camera.current = true
 
@@ -132,6 +139,9 @@ func _ready() -> void:
 	map = MapOverlay.new()
 	ui.add_child(map)
 	map.setup(self)
+	oob = OobView.new()
+	ui.add_child(oob)
+	oob.setup(self)
 
 	print("HITS M0 (%s): %d battalions, %d men, built in %d ms" % [GS.Scenario.keys()[scenario], sim.formations.size(), sim.soldiers_alive(), Time.get_ticks_msec() - t0])
 	if bench:
@@ -166,28 +176,36 @@ func _pick_contact_site() -> Vector2:
 	return best
 
 
-## Where the general watches from: the first candidate (right flank first,
-## then behind the line) with a clear line of sight to every battalion.
+## Where the general watches from in Brigade contact: right flank first, then
+## behind the line.
 func _pick_contact_viewpoint(site: Vector2) -> Vector2:
 	var back := site.y + CONTACT_GAP * 0.5
-	var candidates := [
+	return _best_viewpoint([
 		Vector2(site.x + 330.0, back + 30.0), Vector2(site.x + 250.0, back + 45.0),
 		Vector2(site.x - 330.0, back + 30.0), Vector2(site.x + 470.0, back + 60.0),
 		Vector2(site.x + 150.0, back + 70.0), Vector2(site.x + 380.0, back + 120.0),
 		Vector2(site.x - 470.0, back + 60.0), Vector2(site.x + 60.0, back + 45.0),
-	]
+	])
+
+
+## The first candidate that can see every battalion, otherwise the one that
+## sees the most (preferring earlier candidates on a tie).
+func _best_viewpoint(candidates: Array) -> Vector2:
+	var best: Vector2 = candidates[0]
+	var best_n := -1
 	for c in candidates:
 		var eye := Vector3(c.x, terrain.height(c.x, c.y) + PlayerRider.EYE, c.y)
-		var clear := true
+		var n := 0
 		for f in sim.formations:
 			var p: Vector2 = f.center()
-			if not terrain.line_of_sight(eye, Vector3(p.x, terrain.height(p.x, p.y) + 2.0, p.y), 24):
-				clear = false
-				break
-		if clear:
-			print("contact site %s, general at %s" % [site, c - site])
+			if terrain.line_of_sight(eye, Vector3(p.x, terrain.height(p.x, p.y) + 2.0, p.y), 24):
+				n += 1
+		if n == sim.formations.size():
 			return c
-	return candidates[-1]
+		if n > best_n:
+			best_n = n
+			best = c
+	return best
 
 
 func _parse_args() -> void:
@@ -283,56 +301,80 @@ func clock_text() -> String:
 
 # ---------------------------------------------------------------- input
 
+## Mouse: look, telescope magnification, and recapturing the mouse after a menu.
+## (The map and the order of battle take their clicks first, as GUI.)
 func _unhandled_input(event: InputEvent) -> void:
 	if bench:
 		return
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and _look_grace == 0:
+	var captured := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	if event is InputEventMouseMotion and captured and _look_grace == 0:
 		var rel: Vector2 = (event as InputEventMouseMotion).relative
 		if using_free_cam:
 			free_cam.look(rel)
 		else:
 			player.look(rel)
-	elif event is InputEventMouseButton and event.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and not map.visible and not menu_open:
-		_capture_mouse()
-	elif event is InputEventKey and event.pressed and not event.echo:
-		var key := (event as InputEventKey).keycode
-		if key == KEY_ESCAPE:
-			if map.visible:
-				_toggle_map()
-			elif menu_open:
-				_close_menu()
-			else:
-				_open_menu()
+	elif event is InputEventMouseButton and event.pressed:
+		var mb := event as InputEventMouseButton
+		if captured and player.telescope and (mb.button_index == MOUSE_BUTTON_WHEEL_UP or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN):
+			player.change_magnification(1.25 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else 0.8)
+			_hud_t = 0.0  # show the new magnification at once
+		elif not captured and not _overlay_open() and not menu_open:
+			_capture_mouse()
+
+
+## Keys are taken before the GUI so that T, M, O and Esc work even while the
+## order of battle's tree has keyboard focus.
+func _input(event: InputEvent) -> void:
+	if bench or not (event is InputEventKey) or not event.pressed or event.echo:
+		return
+	var key := (event as InputEventKey).keycode
+	if key == KEY_ESCAPE:
+		if _overlay_open():
+			_open_overlay(null)
+		elif player.telescope:
+			_set_telescope(false)
+		elif menu_open:
+			_close_menu()
+		else:
+			_open_menu()
+		get_viewport().set_input_as_handled()
+		return
+	if menu_open:
+		return
+	match key:
+		KEY_M, KEY_TAB:
+			_open_overlay(null if map.visible else map)
+		KEY_O:
+			_open_overlay(null if oob.visible else oob)
+		KEY_T:
+			_set_telescope(not player.telescope)
+		KEY_F:
+			_set_free_cam(not using_free_cam)
+		KEY_EQUAL, KEY_KP_ADD:
+			time_scale_idx = mini(time_scale_idx + 1, TIME_SCALES.size() - 1)
+		KEY_MINUS, KEY_KP_SUBTRACT:
+			time_scale_idx = maxi(time_scale_idx - 1, 0)
+		KEY_P:
+			paused = not paused
+		KEY_L:
+			renderer.lod_mode = (renderer.lod_mode + 1) % FormationRenderer.LOD_MODES.size()
+			hud.toast("LOD: " + FormationRenderer.LOD_MODES[renderer.lod_mode])
+		KEY_V:
+			renderer.los_enabled = not renderer.los_enabled
+			hud.toast("LOS culling " + ("on" if renderer.los_enabled else "off"))
+		KEY_K:
+			sim.chaos()
+			hud.toast("Chaos: every battalion changes formation")
+		KEY_G:
+			sim.ai_enabled[PLAYER_ARMY] = not sim.ai_enabled[PLAYER_ARMY]
+			hud.toast("Autopilot for your army " + ("on" if sim.ai_enabled[PLAYER_ARMY] else "off"))
+		KEY_H:
+			hud.help.visible = not hud.help.visible
+		KEY_1, KEY_2, KEY_3, KEY_4:
+			map.order_ftype = key - KEY_1
+		_:
 			return
-		if menu_open:
-			return
-		match key:
-			KEY_M, KEY_TAB:
-				_toggle_map()
-			KEY_F:
-				_set_free_cam(not using_free_cam)
-			KEY_EQUAL, KEY_KP_ADD:
-				time_scale_idx = mini(time_scale_idx + 1, TIME_SCALES.size() - 1)
-			KEY_MINUS, KEY_KP_SUBTRACT:
-				time_scale_idx = maxi(time_scale_idx - 1, 0)
-			KEY_P:
-				paused = not paused
-			KEY_L:
-				renderer.lod_mode = (renderer.lod_mode + 1) % FormationRenderer.LOD_MODES.size()
-				hud.toast("LOD: " + FormationRenderer.LOD_MODES[renderer.lod_mode])
-			KEY_O:
-				renderer.los_enabled = not renderer.los_enabled
-				hud.toast("LOS culling " + ("on" if renderer.los_enabled else "off"))
-			KEY_K:
-				sim.chaos()
-				hud.toast("Chaos: every battalion changes formation")
-			KEY_G:
-				sim.ai_enabled[PLAYER_ARMY] = not sim.ai_enabled[PLAYER_ARMY]
-				hud.toast("Autopilot for your army " + ("on" if sim.ai_enabled[PLAYER_ARMY] else "off"))
-			KEY_H:
-				hud.help.visible = not hud.help.visible
-			KEY_1, KEY_2, KEY_3, KEY_4:
-				map.order_ftype = (event as InputEventKey).keycode - KEY_1
+	get_viewport().set_input_as_handled()
 
 
 ## Capturing warps the cursor, which arrives as one large mouse motion: ignore
@@ -356,15 +398,44 @@ func _close_menu() -> void:
 	_capture_mouse()
 
 
-func _toggle_map() -> void:
-	map.visible = not map.visible
-	if map.visible:
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	else:
+func _overlay_open() -> bool:
+	return map.visible or oob.visible
+
+
+## The map and the order of battle are full-screen; at most one is open.
+## null closes both and gives the mouse back to the saddle.
+func _open_overlay(which: Control) -> void:
+	if oob.visible and which != oob:
+		oob.close()
+	map.visible = which == map
+	if which == oob:
+		oob.open()
+	if which == null:
 		_capture_mouse()
+	else:
+		_set_telescope(false)
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+## From the order of battle: open the map on a unit.
+func show_on_map(world: Vector2, zoom: float, brigade_id: int) -> void:
+	_open_overlay(map)
+	map.focus(world, zoom)
+	if brigade_id >= 0:
+		map.selected = brigade_id
+
+
+func _set_telescope(on: bool) -> void:
+	if on and using_free_cam:
+		hud.toast("The telescope is used from the saddle (F to return to it).")
+		return
+	player.set_telescope(on)
+	hud.scope.visible = on
+	_hud_t = 0.0
 
 
 func _set_free_cam(on: bool) -> void:
+	_set_telescope(false)
 	using_free_cam = on
 	if on:
 		free_cam.place(player.camera.global_position, player.yaw, player.pitch)
@@ -393,13 +464,15 @@ func _process(delta: float) -> void:
 		smoke.update_dust(sim.formations, sim.time, terrain)
 	var t1 := Time.get_ticks_usec()
 
-	player.input_enabled = not map.visible and not using_free_cam and not bench and not menu_open
-	free_cam.input_enabled = using_free_cam and not map.visible and not bench and not menu_open
+	player.input_enabled = not _overlay_open() and not using_free_cam and not bench and not menu_open
+	free_cam.input_enabled = using_free_cam and not _overlay_open() and not bench and not menu_open
 	player.update(delta)
 	free_cam.update(delta)
 	var cam: Camera3D = free_cam if using_free_cam else player.camera
 	var render_time: float = sim.time - BattleSim.TICK * (1.0 - sim.alpha())
-	renderer.update(cam.global_position, sim.alpha(), sim.time)
+	var lod_scale: float = 1.0 if using_free_cam else player.lod_scale()
+	# The telescope's round field is about the camera's vertical FOV; add a margin.
+	renderer.update(cam.global_position, sim.alpha(), sim.time, lod_scale, -cam.global_basis.z, cos(deg_to_rad(cam.fov) * 0.75))
 	renderer.set_sim_time(render_time)
 	smoke.mat.set_shader_parameter("sim_time", render_time)
 	var t2 := Time.get_ticks_usec()
@@ -446,6 +519,7 @@ func _consume_events() -> void:
 
 
 func _update_hud() -> void:
+	hud.scope_label.text = "x%d" % roundi(player.magnification)
 	var gpu := RenderingServer.viewport_get_measured_render_time_gpu(_vp)
 	var draws := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
 	var prims := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME)
@@ -457,10 +531,10 @@ func _update_hud() -> void:
 		"men alive %d  (French %d / Allied %d)   battalions %d   fallen %d" % [sim.soldiers_alive(), sim.soldiers_alive(0), sim.soldiers_alive(1), sim.formations.size(), corpses.total],
 		"near %d bn / %dk men | mid %d / %dk | far %d / %dk | ribbon %d / %dk | hidden %d / %dk" % [tb[0], tm[0] / 1000, tb[1], tm[1] / 1000, tb[2], tm[2] / 1000, tb[3], tm[3] / 1000, tb[4], tm[4] / 1000],
 		"LOD %s   LOS culling %s   smoke puffs %d   couriers riding %d (delivered %d, lost %d)" % [FormationRenderer.LOD_MODES[renderer.lod_mode], "on" if renderer.los_enabled else "off", smoke.live_estimate(), couriers.riding_count(PLAYER_ARMY), couriers.delivered, couriers.lost],
-		("free camera" if using_free_cam else "in the saddle: %s" % player.gait()) + ("   autopilot ON" if sim.ai_enabled[PLAYER_ARMY] else ""),
+		("free camera" if using_free_cam else "in the saddle: %s" % ("telescope x%d" % roundi(player.magnification) if player.telescope else player.gait())) + ("   autopilot ON" if sim.ai_enabled[PLAYER_ARMY] else ""),
 	]
 	hud.stats.text = "\n".join(lines)
-	hud.stats.visible = not map.visible
+	hud.stats.visible = not _overlay_open()
 	hud.clock.text = clock_text()
 
 

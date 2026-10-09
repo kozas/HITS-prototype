@@ -206,7 +206,12 @@ Army (player = C-in-C)
          └─ Cavalry regiment → squadrons
 ```
 
-Prototype M0 has Brigade → Battalion only, and the player orders brigades.
+The prototype models the full chain: army, then corps (4 divisions), then
+division (2 brigades), then brigade, then battalion.
+- **Classes:** `Command` covers every headquarters, and `Brigade` extends it with battalions and orders.
+- **Names:** generated in period style, e.g. "IIe Corps", "Brigade Dumont", "2e bataillon, 45e de Ligne", "Pickering's Brigade", "1st Battalion, 52nd Foot".
+- **Viewer:** the order of battle (O) shows the whole tree. For the enemy it shows only what has been seen, with guessed strengths: it is the player's knowledge, not ground truth.
+- **Orders:** the player still sends orders to brigades only. Passing orders down through corps and division HQs (each adding its own delay and interpretation) is M1.
 
 ### Unit state (battalion)
 Position, facing, formation type plus transition (from, to, start, duration),

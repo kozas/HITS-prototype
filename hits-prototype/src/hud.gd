@@ -2,9 +2,9 @@ extends Control
 ## Stats overlay, battle clock, dispatch messages and key help.
 
 const HELP := """[W] trot  [Shift+W] gallop  [Ctrl+W] walk  [S] back  [A/D] sidestep  mouse: look
-[M]/[Tab] map & orders    [F] free camera (QE up/down, Shift fast)
-[=]/[-] time scale   [P] pause   [G] AI autopilot for your army
-[L] LOD mode   [O] LOS culling   [K] chaos: everyone changes formation
+[T] telescope (wheel: magnification)   [M]/[Tab] map & orders   [O] order of battle
+[F] free camera (QE up/down, Shift fast)   [=]/[-] time scale   [P] pause
+[G] AI autopilot for your army   [L] LOD mode   [V] LOS culling   [K] chaos
 [H] hide help   [Esc] menu"""
 
 var stats: Label
@@ -12,6 +12,8 @@ var clock: Label
 var help: Label
 var toasts: VBoxContainer
 var pause_panel: PanelContainer
+var scope: ColorRect
+var scope_label: Label
 var resume_button: Button
 
 
@@ -29,6 +31,20 @@ func setup() -> void:
 	help.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	help.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_pin(help, Vector4(1, 1, 1, 1), Vector4(-12, -12, -12, -12))
+	# Telescope eyepiece, drawn under the text.
+	scope = ColorRect.new()
+	var mat := ShaderMaterial.new()
+	mat.shader = preload("res://shaders/scope.gdshader")
+	scope.material = mat
+	scope.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	scope.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	scope.visible = false
+	add_child(scope)
+	move_child(scope, 0)
+	scope_label = _label(16)
+	scope_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_pin(scope_label, Vector4(0.5, 1, 0.5, 1), Vector4(-150, -44, 150, -16))
+	scope_label.reparent(scope, false)
 	toasts = VBoxContainer.new()
 	toasts.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	toasts.mouse_filter = Control.MOUSE_FILTER_IGNORE

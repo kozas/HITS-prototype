@@ -4,6 +4,9 @@ extends RefCounted
 ## men, only with the number of battalions.
 
 const Formation = preload("res://src/formation.gd")
+const Command = preload("res://src/command.gd")
+const Brigade = preload("res://src/brigade.gd")
+const OobNames = preload("res://src/oob_names.gd")
 const T := Formation.Type
 
 const TICK := 0.1
@@ -14,39 +17,18 @@ const MAP_LIMIT := 2900.0
 const COMPANIES := [6, 10]
 ## Interval between battalions side by side (15.6 m in the French drill).
 const BN_INTERVAL := 15.6
-
-
-class Brigade:
-	var id := 0
-	var army := 0
-	var label := ""
-	var row := 0
-	var battalions: Array = []
-	var pending: Array = []
-	var current = null
-	var awaiting := false
-	var ai_next := 0.0
-
-	func alive() -> Array:
-		var out := []
-		for f in battalions:
-			if not f.dead:
-				out.append(f)
-		return out
-
-	func centroid() -> Vector2:
-		var c := Vector2.ZERO
-		var n := 0
-		for f in battalions:
-			if not f.dead:
-				c += f.center()
-				n += 1
-		return c / n if n > 0 else Vector2.ZERO
+## Order of battle: brigades per division, divisions per corps.
+const BRIGADES_PER_DIVISION := 2
+const DIVISIONS_PER_CORPS := 4
 
 
 var terrain
 var formations: Array = []
 var brigades: Array = []
+## Top of each army's chain of command (Command, level ARMY), by army index.
+var armies: Array = [null, null]
+var names: OobNames
+var _regiment := [0, 0]
 var time := 0.0
 var accum := 0.0
 var tick_count := 0
@@ -64,6 +46,7 @@ var rng := RandomNumberGenerator.new()
 func _init(t) -> void:
 	terrain = t
 	rng.seed = 1815
+	names = OobNames.new(1815)
 
 
 # ---------------------------------------------------------------- deployment
@@ -84,12 +67,12 @@ func deploy(bns_per_side: int, men: int, front_z: float) -> void:
 			var in_row := mini(per_row, brig_count - row * per_row)
 			var bx := (col - (in_row - 1) * 0.5) * 640.0
 			var bz := sgn * (front_z + row * 260.0)
-			var b := _add_brigade(army, row, "%s Bde %d" % ["Fr" if army == 0 else "Al", bi + 1])
+			var b := _add_brigade(army, row)
 			for k in per_brigade:
 				if made >= bns_per_side:
 					break
 				var p := Vector2(bx, bz) + right * (k - (per_brigade - 1) * 0.5) * 120.0
-				_add_battalion(b, "%d/%d" % [k + 1, bi + 1], men, p, yaw, T.COLUMN)
+				_add_battalion(b, men, p, yaw, T.COLUMN)
 				made += 1
 			# Opening orders, delivered before the battle: first line deploys forward,
 			# second line follows in column, the rest wait in reserve.
@@ -100,25 +83,26 @@ func deploy(bns_per_side: int, men: int, front_z: float) -> void:
 				o.delivered = 0.0
 				o.exec_at = rng.randf_range(0.0, 30.0)
 				b.pending.append(o)
+		_organise(army)
 
 
 ## Small engagement: one brigade per side in line, `gap` metres apart (front
 ## rank to front rank) around `site`. The French brigade is already advancing
 ## on the Allied line, which stands and waits. Neither side has an AI general.
 func deploy_contact(site: Vector2, men: int, gap: float) -> void:
-	var names := ["1st Brigade (Fr)", "Allied Brigade"]
 	for army in 2:
 		var yaw := 0.0 if army == 0 else PI
 		var right := Vector2(cos(yaw), -sin(yaw))
 		var front := Vector2(site.x, site.y + gap * (0.5 if army == 0 else -0.5))
-		var b := _add_brigade(army, 0, names[army])
+		var b := _add_brigade(army, 0)
 		var ranks := 3 if army == 0 else 2
 		var w: float = Formation.footprint_for(T.LINE, men, ranks, COMPANIES[army]).x
 		var total := 4.0 * w + 3.0 * BN_INTERVAL
 		for k in 4:
 			var p := front + right * (-total * 0.5 + w * 0.5 + k * (w + BN_INTERVAL))
-			_add_battalion(b, ["1st", "2nd", "3rd", "4th"][k], men, p, yaw, T.LINE)
+			_add_battalion(b, men, p, yaw, T.LINE)
 		hq[army] = front + Vector2(0, 600.0 if army == 0 else -600.0)
+		_organise(army)
 	# Advance to 60 m short of the enemy line: close enough to stay in line
 	# (no column for the march) and the halt-and-fire SOP stops them at musket range.
 	var o := make_order(brigades[0], Vector2(site.x, site.y - gap * 0.5 + 60.0), 0.0, T.LINE)
@@ -129,23 +113,41 @@ func deploy_contact(site: Vector2, men: int, gap: float) -> void:
 	ai_enabled = [false, false]
 
 
-func _add_brigade(army: int, row: int, label: String) -> Brigade:
+## Brigades are named after their général, as was the custom.
+func _add_brigade(army: int, row: int) -> Brigade:
 	var b := Brigade.new()
 	b.id = brigades.size()
 	b.army = army
 	b.row = row
-	b.label = label
+	var surname := names.surname(army)
+	b.commander = "%s %s" % [OobNames.RANKS[army][Command.Level.BRIGADE], surname]
+	var n := OobNames.brigade_names(army, surname)
+	b.title = n[0]
+	b.label = n[1]
 	b.ai_next = rng.randf_range(20.0, 120.0)
 	brigades.append(b)
 	return b
 
 
-func _add_battalion(b: Brigade, label: String, men: int, p: Vector2, yaw: float, ftype: int) -> Formation:
+## French brigades are two regiments of two battalions; British brigades are
+## single battalions of different regiments. Light brigades match the
+## renderer's palette (FormationRenderer.palette).
+func _add_battalion(b: Brigade, men: int, p: Vector2, yaw: float, ftype: int) -> Formation:
+	var k := b.battalions.size()
+	var light := (b.id % 7 == 5) if b.army == 0 else (b.id % 9 == 4)
+	var bn := k % 2 + 1
+	if b.army == 1:
+		bn = 1 + names.rng.randi() % 2
+	if b.army == 1 or k % 2 == 0:
+		_regiment[b.army] += 1 + names.rng.randi() % 3
 	var f := Formation.new()
 	f.id = formations.size()
 	f.army = b.army
 	f.brigade = b.id
-	f.label = label
+	var n := OobNames.battalion_names(b.army, _regiment[b.army], bn, light)
+	f.title = n[0]
+	f.label = n[1]
+	f.commander = names.commander(b.army, 4)
 	f.ranks = 3 if b.army == 0 else 2
 	f.companies = COMPANIES[b.army]
 	f.max_strength = men
@@ -161,6 +163,44 @@ func _add_battalion(b: Brigade, label: String, men: int, p: Vector2, yaw: float,
 	b.battalions.append(f)
 	formations.append(f)
 	return f
+
+
+## Builds the chain of command above one army's brigades: army > corps >
+## division > brigade. Brigades are in deployment order, so neighbours share a
+## division and divisions in the same part of the field share a corps.
+func _organise(army: int) -> void:
+	var a := Command.new()
+	a.level = Command.Level.ARMY
+	a.army = army
+	a.title = OobNames.ARMY_TITLES[army]
+	a.label = a.title
+	a.commander = names.commander(army, Command.Level.ARMY)
+	armies[army] = a
+	var corps = null
+	var division = null
+	var n_div := 0
+	var n_corps := 0
+	for b in brigades:
+		if b.army != army:
+			continue
+		if division == null or division.subordinates.size() >= BRIGADES_PER_DIVISION:
+			if corps == null or corps.subordinates.size() >= DIVISIONS_PER_CORPS:
+				n_corps += 1
+				corps = _add_command(a, Command.Level.CORPS, OobNames.corps_title(army, n_corps))
+			n_div += 1
+			division = _add_command(corps, Command.Level.DIVISION, OobNames.division_title(army, n_div))
+		division.add(b)
+
+
+func _add_command(parent, level: int, title: String):
+	var c := Command.new()
+	c.level = level
+	c.army = parent.army
+	c.title = title
+	c.label = title
+	c.commander = names.commander(parent.army, level)
+	parent.add(c)
+	return c
 
 
 func make_order(b, dest: Vector2, facing: float, ftype: int) -> Dictionary:
