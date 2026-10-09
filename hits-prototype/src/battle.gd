@@ -17,6 +17,7 @@ const OobView = preload("res://src/oob_view.gd")
 const Hud = preload("res://src/hud.gd")
 const Meshes = preload("res://src/meshes.gd")
 const Formation = preload("res://src/formation.gd")
+const Orientation = preload("res://src/orientation.gd")
 
 const PLAYER_ARMY := 0
 const TIME_SCALES := [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
@@ -300,9 +301,12 @@ func _hq_for(army: int) -> Vector2:
 	return player_xz() if army == PLAYER_ARMY else sim.hq[army]
 
 
-func issue_player_order(brigade_id: int, dest: Vector2, facing: float, ftype: int) -> void:
+## The general writes an order (where, and in what formation) and a courier
+## rides off with it. The brigade chooses its own front when it acts on it.
+func issue_player_order(brigade_id: int, dest: Vector2, ftype: int) -> void:
 	var b = sim.brigades[brigade_id]
-	var o: Dictionary = sim.make_order(b, dest, facing, ftype)
+	var o: Dictionary = sim.make_order(b, dest, ftype)
+	o.player = true
 	player_orders.append(o)
 	couriers.dispatch(o, player_xz())
 	var dist: float = player_xz().distance_to(b.centroid())
@@ -345,7 +349,9 @@ func _input(event: InputEvent) -> void:
 		return
 	var key := (event as InputEventKey).keycode
 	if key == KEY_ESCAPE:
-		if _overlay_open():
+		if map.visible and map.has_draft():
+			map.cancel_draft()
+		elif _overlay_open():
 			_open_overlay(null)
 		elif player.telescope:
 			_set_telescope(false)
@@ -387,7 +393,13 @@ func _input(event: InputEvent) -> void:
 		KEY_H:
 			hud.help.visible = not hud.help.visible
 		KEY_1, KEY_2, KEY_3, KEY_4:
-			map.order_ftype = key - KEY_1
+			if not map.has_draft():
+				return
+			map.set_draft_ftype(key - KEY_1)
+		KEY_ENTER, KEY_KP_ENTER:
+			if not map.has_draft():
+				return
+			map.issue_draft()
 		_:
 			return
 	get_viewport().set_input_as_handled()
@@ -438,7 +450,7 @@ func show_on_map(world: Vector2, zoom: float, brigade_id: int) -> void:
 	_open_overlay(map)
 	map.focus(world, zoom)
 	if brigade_id >= 0:
-		map.selected = brigade_id
+		map.select(brigade_id)
 
 
 func _set_telescope(on: bool) -> void:
@@ -531,6 +543,10 @@ func _consume_events() -> void:
 			"rout":
 				if ev.f.army == PLAYER_ARMY and not bench:
 					hud.toast("Battalion %s (%s) is breaking!" % [ev.f.label, sim.brigades[ev.f.brigade].label])
+			"order_executing":
+				var o: Dictionary = ev.o
+				if o.get("player", false) and not bench:
+					hud.toast("%s moves off to form %s, %s" % [sim.brigades[o.brigade].label, Formation.TYPE_NAMES[o.ftype].to_lower(), Orientation.describe(o.facing, o.facing_reason)])
 	sim.events.clear()
 
 

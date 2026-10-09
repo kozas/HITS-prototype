@@ -223,11 +223,29 @@ An order is *intent*, not a waypoint: **objective** (place, or a unit to
 support or attack), **posture** (attack / hold / screen / retire), **formation
 preference**, and **conditions** ("if pressed, fall back on X"). The recipient's
 AI turns it into concrete moves using its personality (initiative, aggression,
-caution). The prototype implements "go to X, face Y, form Z", which has the same
+caution). The prototype implements "go to X, form Z", which has the same
 plumbing.
 
+**Orientation is the unit's call, not the general's.** An order never carries a
+facing. When a brigade acts on an order it chooses its own front
+(`orientation.gd`): toward the enemy near the destination if there is any, along
+the line of march if not, otherwise it keeps its present front. A march column
+always faces along its road. The decision carries a reason, which the dispatch
+reports ("moves off to form line, facing the enemy (N)"). The map previews the
+front the brigade would likely choose, but the brigade decides when it acts,
+with what it knows then. Planned: re-deciding on the march and at the halt as
+threats appear, deciding from the commander's own knowledge instead of ground
+truth, refusing a flank, using crests and reverse slopes, and the same rules for
+every level from corps to battalion.
+
+**Writing an order on the map:** select a brigade, right-click the destination,
+choose the formation to take there, then Issue. Nothing happens until Issue:
+only then does the courier ride. On delivery the brigade takes 20–75 s to
+prepare before it moves off. Later the brigade will also re-form for the march
+before stepping off.
+
 ### Order lifecycle (implemented in M0)
-`written → riding → delivered → staff delay → executing → (complete | superseded)`,
+`written → issued → riding → delivered → preparing (staff delay) → executing → (complete | superseded)`,
 with `lost` when the courier is killed. Reports flow back the other way: in M1 we
 add periodic ADC reports and "no word from 3rd Brigade" when couriers don't
 return.

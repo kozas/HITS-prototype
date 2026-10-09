@@ -7,6 +7,7 @@ const Formation = preload("res://src/formation.gd")
 const Command = preload("res://src/command.gd")
 const Brigade = preload("res://src/brigade.gd")
 const OobNames = preload("res://src/oob_names.gd")
+const Orientation = preload("res://src/orientation.gd")
 const T := Formation.Type
 
 const TICK := 0.1
@@ -78,7 +79,7 @@ func deploy(bns_per_side: int, men: int, front_z: float) -> void:
 			# second line follows in column, the rest wait in reserve.
 			if row <= 1:
 				var dest := Vector2(bx, sgn * (160.0 if row == 0 else 400.0))
-				var o := make_order(b, dest, yaw, T.LINE if row == 0 else T.COLUMN)
+				var o := make_order(b, dest, T.LINE if row == 0 else T.COLUMN, yaw)
 				o.status = "staff"
 				o.delivered = 0.0
 				o.exec_at = rng.randf_range(0.0, 30.0)
@@ -105,7 +106,7 @@ func deploy_contact(site: Vector2, men: int, gap: float) -> void:
 		_organise(army)
 	# Advance to 60 m short of the enemy line: close enough to stay in line
 	# (no column for the march) and the halt-and-fire SOP stops them at musket range.
-	var o := make_order(brigades[0], Vector2(site.x, site.y - gap * 0.5 + 60.0), 0.0, T.LINE)
+	var o := make_order(brigades[0], Vector2(site.x, site.y - gap * 0.5 + 60.0), T.LINE, 0.0)
 	o.status = "staff"
 	o.delivered = 0.0
 	o.exec_at = 0.0
@@ -242,11 +243,15 @@ func _add_command(parent, level: int, title: String):
 	return c
 
 
-func make_order(b, dest: Vector2, facing: float, ftype: int) -> Dictionary:
+## An order is a destination and a formation. `facing` is normally left null:
+## the brigade decides its own front when it acts on the order (Orientation).
+## Scripted openings may still fix it.
+func make_order(b, dest: Vector2, ftype: int, facing = null) -> Dictionary:
 	_order_id += 1
 	return {
 		"id": _order_id, "army": b.army, "brigade": b.id, "dest": dest, "facing": facing,
-		"ftype": ftype, "issued": time, "delivered": -1.0, "exec_at": -1.0, "status": "riding",
+		"facing_reason": -1, "ftype": ftype, "issued": time, "delivered": -1.0, "exec_at": -1.0,
+		"status": "riding",
 	}
 
 
@@ -363,10 +368,12 @@ func _apply_order(b, o: Dictionary) -> void:
 	if bns.is_empty():
 		return
 	var ft: int = o.ftype
+	if o.facing == null:
+		var d := Orientation.decide(self, b, o.dest, ft)
+		o.facing = d.facing
+		o.facing_reason = d.reason
 	var facing: float = o.facing
-	var right := Vector2(cos(facing), -sin(facing))
-	bns.sort_custom(func(a, c): return a.pos.dot(right) < c.pos.dot(right))
-	var slots := _brigade_slots(bns, o.dest, facing, ft)
+	var slots := assign_slots(bns, o.dest, facing, ft)
 	for k in bns.size():
 		var f = bns[k]
 		if f.routing:
@@ -381,6 +388,15 @@ func _apply_order(b, o: Dictionary) -> void:
 		b.current.status = "superseded"
 	o.status = "executing"
 	b.current = o
+	events.append({"type": "order_executing", "o": o})
+
+
+## Sorts `bns` left to right across the new front (so no two battalions cross)
+## and returns the anchor each one takes, in that order.
+func assign_slots(bns: Array, dest: Vector2, facing: float, ft: int) -> Array:
+	var right := Vector2(cos(facing), -sin(facing))
+	bns.sort_custom(func(a, c): return a.pos.dot(right) < c.pos.dot(right))
+	return _brigade_slots(bns, dest, facing, ft)
 
 
 ## Where each battalion of a brigade stands (its anchor) in formation `ft`, with
@@ -615,14 +631,12 @@ func _ai() -> void:
 				target = ob
 		if target == null:
 			continue
-		var to: Vector2 = target.centroid() - c
-		var dir := to.normalized()
-		var facing := atan2(-dir.x, -dir.y)
+		var dir: Vector2 = (target.centroid() - c).normalized()
 		var o: Dictionary
 		if bd > 900.0:
-			o = make_order(b, c + dir * 450.0, facing, T.COLUMN)
+			o = make_order(b, c + dir * 450.0, T.COLUMN)
 		else:
-			o = make_order(b, target.centroid() - dir * 120.0, facing, T.LINE if rng.randf() < 0.75 else T.COLUMN)
+			o = make_order(b, target.centroid() - dir * 120.0, T.LINE if rng.randf() < 0.75 else T.COLUMN)
 		b.awaiting = true
 		if order_sink.is_valid():
 			order_sink.call(o)

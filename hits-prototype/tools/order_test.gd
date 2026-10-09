@@ -21,7 +21,7 @@ func _process(_delta: float) -> bool:
 		main.time_scale_idx = main.TIME_SCALES.size() - 1
 		var b = main.sim.brigades[2]
 		var dest: Vector2 = b.centroid() + Vector2(0, -300)
-		main.issue_player_order(b.id, dest, 0.0, 2)  # square, 300 m forward
+		main.issue_player_order(b.id, dest, 2)  # square, 300 m forward
 		order = main.player_orders[-1]
 		print("t=%.0fs order written for %s, %.0f m from the general" % [main.sim.time, b.label, main.player_xz().distance_to(b.centroid())])
 	if frames > 2:
@@ -29,6 +29,8 @@ func _process(_delta: float) -> bool:
 		if not seen.has(st):
 			seen[st] = main.sim.time
 			print("t=%.0fs status -> %s" % [main.sim.time, st])
+			if st == "executing":
+				print("  the brigade chose its front: %s" % main.Orientation.describe(order.facing, order.facing_reason))
 		if st == "executing":
 			var b = main.sim.brigades[order.brigade]
 			var squares := 0

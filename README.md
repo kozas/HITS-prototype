@@ -55,7 +55,7 @@ Command-line options (after `--`):
 | W / Shift+W / Ctrl+W | trot / gallop / walk |
 | S, A/D | back up, sidestep |
 | T | telescope: the general halts and raises his glass (4–20×, mouse wheel); detail follows the magnification |
-| M or Tab | map. Wheel zooms at the cursor and dragging (left on empty ground, or middle) pans. LMB selects a brigade; RMB-drag from the destination sets the facing; 1–4 picks Line / Column / Square / March. Releasing sends a courier |
+| M or Tab | map. Wheel zooms at the cursor and dragging (left on empty ground, or middle) pans. LMB selects a brigade; RMB sets its destination and opens the order popup: pick the formation to take on arrival (or 1–4: Line / Column / Square / March), then Issue (Enter) to send a courier, or Cancel (Esc). A green ghost shows the brigade as it would stand. You don't set a facing: the brigade chooses its own front when it acts on the order |
 | O | order of battle: Army > Corps > Division > Brigade > Battalion, with commanders, strength and situation. The enemy shows only as far as he has been seen. Double-click a unit to find it on the map |
 | = / - | time scale (×0.5 … ×16) |
 | P | pause |
@@ -106,8 +106,8 @@ Use `--bn=1` for a French battalion and `--bn=5` for a British one.
 
 UI review also needs a window. It runs the full battle for 10 minutes, then
 captures the saddle view, the telescope at 10× and 20×, the map zoomed out and
-in, and the order of battle (own army, the enemy as observed, and a
-double-click jumping to the map):
+in, the order of battle (own army, the enemy as observed, and a
+double-click jumping to the map), and an order being written and sent:
 
 ```bash
 C:/Godot/Godot_v4.6.1-stable_win64_console.exe --path hits-prototype --resolution 1600x900 --script res://tools/ui_shots.gd -- --out=shots
@@ -134,6 +134,7 @@ with an overhead view of the deployment.
 | `src/smoke.gd` + `shaders/smoke.gdshader` | Stateless smoke and dust ring buffer |
 | `src/corpses.gd` | The fallen, 1:1, in spatial chunks |
 | `src/couriers.gd` | Riders that carry orders and can be shot |
+| `src/orientation.gd` | How a unit chooses its own front (orders carry no facing) |
 | `src/terrain.gd` | Heightmap shared by GPU and CPU, LOS raymarch, map definitions (`MAPS`: "ridges", "hill") |
 | `src/map_overlay.gd` + `shaders/map_relief.gdshader` | The general's map (own troops, enemy at last-seen), zoomable, with relief and contours drawn from the heightmap |
 | `src/player_rider.gd` + `shaders/scope.gdshader` | The general in the saddle, and his telescope |

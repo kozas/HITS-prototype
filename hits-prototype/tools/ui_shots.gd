@@ -34,8 +34,18 @@ func _initialize() -> void:
 		[t + 5.0, func(): _open_oob(), "06_oob"],
 		[t + 6.0, func(): _show_enemy_oob(), "07_oob_enemy"],
 		[t + 7.0, func(): _activate_first_brigade(), "08_oob_to_map"],
-		[t + 8.0, func(): _overhead(), "09_overhead"],
+		[t + 8.0, func(): _draft_order(), "09_map_order_draft"],
+		[t + 9.0, func(): battle.map.issue_draft(), "10_map_order_sent"],
+		[t + 10.0, func(): _overhead(), "11_overhead"],
 	]
+
+
+## With the brigade selected from the order of battle: right-click 350 m ahead
+## of it and choose line, leaving the order popup open.
+func _draft_order() -> void:
+	var b = battle.sim.brigades[battle.map.selected]
+	battle.map._set_draft_dest(b.centroid() + Vector2(0, -350))
+	battle.map.set_draft_ftype(0)
 
 
 ## Free camera high behind the player's army, looking over it towards the enemy.
