@@ -41,6 +41,19 @@ static func battalion(sim, army: int, at: Vector2, yaw: float, ftype: int, men :
 	return f
 
 
+## A brigade of `n` battalions drawn up abreast in `ftype`, the centre of its
+## front at ORIGIN + `at`.
+static func brigade(sim, army: int, at: Vector2, yaw: float, ftype: int, n := 4):
+	var b = sim._add_brigade(army, 0)
+	for k in n:
+		sim._add_battalion(b, 600, ORIGIN + at, yaw, ftype)
+	var slots: Array = sim._brigade_slots(b.battalions, ORIGIN + at, yaw, ftype)
+	for k in n:
+		b.battalions[k].pos = slots[k]
+		b.battalions[k].prev_pos = slots[k]
+	return b
+
+
 ## Call once every unit is placed.
 static func ready(sim) -> void:
 	for army in 2:

@@ -27,8 +27,17 @@ const CHARGE_MORALE := 0.35
 const RALLY_AFTER := 90.0
 ## Routing battalions run this far back from the danger to re-form.
 const RALLY_DISTANCE := 350.0
-## Battalions farther than this from where they are going march in column.
+## How a unit marches when left to choose (choose_march):
+## farther than this, and in contact, it goes in column of attack;
 const COLUMN_DISTANCE := 300.0
+## a line in contact advances or retires in line up to this far,
+const LINE_ADVANCE := 400.0
+## and shifts sideways by the flank up to this far;
+const FLANK_MARCH := 150.0
+## a long march with no formed enemy within ROUTE_CLEAR of either end goes in
+## route column.
+const ROUTE_DISTANCE := 800.0
+const ROUTE_CLEAR := 1500.0
 ## In place when this close.
 const ARRIVED := 25.0
 const FALLBACK_DISTANCE := 100.0
@@ -36,6 +45,8 @@ const FALLBACK_DISTANCE := 100.0
 ## formed enemy comes within SCREEN_CLEAR of them.
 const SCREEN_DEPTH := 150.0
 const SCREEN_CLEAR := 120.0
+## ...or when their own battalion comes up to within this distance of them.
+const SCREEN_MIN := 60.0
 ## A battalion left to itself throws out its skirmishers when formed enemy is
 ## between these distances.
 const SKIRMISH_FROM := Vector2(300.0, 800.0)
@@ -128,11 +139,12 @@ static func _pursue(sim, f, o, first: bool) -> void:
 		o.facing_reason = d.reason
 	else:
 		facing = o.facing
-	march_to(sim, f, dest, facing, ft)
+	march_to(sim, f, dest, facing, ft, o.march_ftype)
 
 
-## Drill: march to `dest`, front `facing` there in formation `ft`.
-static func march_to(sim, f, dest: Vector2, facing: float, ft: int) -> void:
+## Drill: march to `dest`, front `facing` there in formation `ft`, marching in
+## formation `march` (AUTO: the chef de bataillon chooses, see choose_march).
+static func march_to(sim, f, dest: Vector2, facing: float, ft: int, march := Order.AUTO) -> void:
 	if f.firing and f.fire_now == F.AT_WILL and sim.time >= f.obey_at:
 		# Men firing at will take time to be got in hand.
 		f.obey_at = sim.time + sim.rng.randf_range(10.0, 20.0)
@@ -141,8 +153,42 @@ static func march_to(sim, f, dest: Vector2, facing: float, ft: int) -> void:
 	f.target_ftype = ft
 	f.has_target = true
 	f.retiring = false
-	var far: bool = f.pos.distance_to(dest) > COLUMN_DISTANCE
-	f.march_ftype = T.COLUMN if far and ft != T.MARCH and ft != T.OPEN else ft
+	f.march_ftype = march if march >= 0 else choose_march(sim, [f], f.pos, dest, ft)
+
+
+## How a unit (one battalion, or a brigade deciding for all its battalions)
+## should march from `from` to `dest`, to form `ft` there:
+## - route column for a long march with no formed enemy near either end;
+## - in line, for a line in contact going a short way straight ahead or back
+##   (or a shorter way sideways, by the flank): it keeps its front throughout;
+## - as it stands, for a column, or for a short move;
+## - otherwise column of attack, deploying at the end.
+## A march column or skirmishers march as they are.
+static func choose_march(sim, units: Array, from: Vector2, dest: Vector2, ft: int, pref := Order.AUTO) -> int:
+	if pref >= 0:
+		return pref
+	if ft == T.MARCH or ft == T.OPEN:
+		return ft
+	var d := from.distance_to(dest)
+	var army: int = units[0].army
+	if d > ROUTE_DISTANCE and sim.nearest_enemy(from, army, ROUTE_CLEAR, true) == null \
+			and sim.nearest_enemy(dest, army, ROUTE_CLEAR, true) == null:
+		return T.MARCH
+	if d <= ARRIVED * 2.0:
+		return ft
+	var all_line := true
+	var all_column := true
+	var front := Vector2.ZERO
+	for f in units:
+		all_line = all_line and f.ftype == T.LINE
+		all_column = all_column and (f.ftype == T.COLUMN or f.ftype == T.MARCH)
+		front += f.forward()
+	if all_line and ft == T.LINE:
+		var along := absf((dest - from).normalized().dot(front.normalized()))
+		return T.LINE if d <= (LINE_ADVANCE if along >= cos(PI * 0.25) else FLANK_MARCH) else T.COLUMN
+	if all_column:
+		return T.COLUMN  # move as it is and deploy on arrival
+	return ft if d <= COLUMN_DISTANCE else T.COLUMN
 
 
 static func halt(f) -> void:
@@ -306,9 +352,15 @@ static func _while_routing(sim, f, e, d: float, dt: float) -> void:
 		sim.events.append({"type": "rally", "f": f})
 
 
-## A light company out skirmishing: keep the screen ahead of the battalion,
-## pick off what it can, and run back to the battalion when formed enemy comes
-## close, the battalion forms square or march column, or it is called in.
+## A light company out skirmishing. Its post is SCREEN_DEPTH ahead of its
+## battalion's front, parallel to it and as wide as it, and it keeps that post
+## as the battalion moves: re-aiming every second, at a pace that keeps up. It
+## never turns as a body (open order keeps facing the battalion's front) and
+## only halts at its post, or where formed enemy will not let it go further. It
+## fires at will whenever it is standing: on enemy skirmishers first, then on
+## formed troops. It runs back and rejoins when called in, when formed enemy
+## comes within SCREEN_CLEAR, when the battalion forms square or march column,
+## or when the battalion comes up to within SCREEN_MIN of it.
 static func _skirmish(sim, s, dt: float) -> void:
 	var f = s.parent
 	s.engaged = false
@@ -323,11 +375,16 @@ static func _skirmish(sim, s, dt: float) -> void:
 			s.begin_transition(T.OPEN, sim.time)
 		return
 	var alone: bool = f == null or f.dead
-	var formed = sim.nearest_enemy(s.cpos, s.army, SEEK_RANGE, true)
-	if not alone and (f.routing or f.ftype == T.SQUARE or f.ftype == T.MARCH):
-		s.recalled = true
-	if formed != null and s.cpos.distance_to(formed.cpos) < SCREEN_CLEAR:
-		s.recalled = true
+	sim.scan_enemies(s.cpos, s.army, SEEK_RANGE)
+	var formed = sim.scan_formed
+	var screen = sim.scan_open
+	if not alone:
+		if f.routing or f.ftype == T.SQUARE or f.ftype == T.MARCH:
+			s.recalled = true
+		elif s.screen_out and (s.pos - f.pos).dot(f.forward()) < SCREEN_MIN:
+			s.recalled = true  # the battalion has come up on its screen
+	if formed != null and s.pos.distance_to(formed.cpos) < SCREEN_CLEAR:
+		s.recalled = true  # measured from the chain, not the support behind it
 	if s.recalled and not alone:
 		cease_fire(sim, s)
 		var home: Vector2 = f.pos - f.right() * f.fp.x * 0.4 + f.back() * 2.0
@@ -335,14 +392,13 @@ static func _skirmish(sim, s, dt: float) -> void:
 			sim.absorb_skirmishers(f)
 			return
 		if not s.has_target or s.target_pos.distance_to(home) > 10.0:
-			march_to(sim, s, home, f.facing, T.OPEN)
+			march_to(sim, s, home, f.facing, T.OPEN, T.OPEN)
 		return
 	if not alone:
-		var post: Vector2 = f.pos + f.forward() * SCREEN_DEPTH
-		if s.target_pos.distance_to(post) > 20.0 and (not s.has_target or s.pos.distance_to(post) > 20.0):
-			march_to(sim, s, post, f.facing, T.OPEN)
-	var e = sim.nearest_enemy(s.cpos, s.army, FIRE_RANGE)
-	if e == null:
+		_keep_station(sim, s, f, formed)
+	# The skirmish fight first; formed troops if no skirmishers are in range.
+	var e = screen if screen != null and s.cpos.distance_to(screen.cpos) <= FIRE_RANGE else formed
+	if e == null or s.cpos.distance_to(e.cpos) > FIRE_RANGE:
 		cease_fire(sim, s)
 		s.morale = minf(s.morale_cap, s.morale + 0.003 * dt)
 		return
@@ -350,13 +406,38 @@ static func _skirmish(sim, s, dt: float) -> void:
 	s.engaged = true
 	s.threat_dir = (e.cpos - s.cpos) / maxf(d, 0.1)
 	s.target_enemy = e
-	if s.has_target and (s.target_pos - s.pos).dot(s.threat_dir) > 0.0:
-		s.halted = true  # skirmishers stop where they can fire
-	if not s.moving or s.halted:
+	if not s.moving:
 		_give_fire(sim, s, e, d)
 	else:
 		cease_fire(sim, s)
 
+
+## The screen's post: SCREEN_DEPTH ahead of the battalion's front, as wide as
+## it. Formed enemy close to the post holds the screen where it stands.
+static func _keep_station(sim, s, f, formed) -> void:
+	set_screen_width(s, f)
+	var post: Vector2 = f.pos + f.forward() * SCREEN_DEPTH
+	if formed != null and formed.cpos.distance_to(post) < SCREEN_CLEAR + 30.0 \
+			and (s.pos - f.pos).dot(f.forward()) < SCREEN_DEPTH:
+		halt(s)  # pressed: hold here rather than go on into his line
+		return
+	if s.pos.distance_to(post) < 20.0:
+		s.screen_out = true
+	# While the battalion marches, keep re-aiming so the screen moves with it.
+	var slack := 3.0 if f.moving else 10.0
+	if s.pos.distance_to(post) > slack or absf(angle_difference(s.facing, f.facing)) > 0.1:
+		if not s.has_target or s.target_pos.distance_to(post) > slack or absf(angle_difference(s.target_facing, f.facing)) > 0.1:
+			march_to(sim, s, post, f.facing, T.OPEN, T.OPEN)
+
+
+## Stretch (or close) the chain to cover the battalion's frontage in line.
+static func set_screen_width(s, f) -> void:
+	var pairs: int = maxi((s.strength - s.strength / 4 + 1) / 2, 1)
+	var gap: float = clampf(f.footprint_as(T.LINE).x / pairs, Formation.SKIRMISH_GAP_RANGE.x, Formation.SKIRMISH_GAP_RANGE.y)
+	if absf(gap - s.open_gap) > 0.25:
+		s.open_gap = gap
+		s.refresh_shape()
+		s.render_dirty = true
 
 ## The brigadier is with his steady battalions: is that within reach?
 static func _brigadier_near(f) -> bool:
@@ -381,8 +462,8 @@ static func _give_fire(sim, f, e, d: float) -> void:
 		var doctrine := Doctrine.of(f.army)
 		var fresh: bool = sim.time - f.last_shot > 60.0
 		mode = F.VOLLEY if fresh and doctrine.opening_volley else doctrine.fire
-	if mode == F.HOLD:
-		cease_fire(sim, f)
+	if mode == F.HOLD or (not f.is_skirmisher and sim.masked(f, e, d)):
+		cease_fire(sim, f)  # ordered to hold, or its own skirmishers are in the way
 		return
 	if mode == F.VOLLEY:
 		if f.firing:

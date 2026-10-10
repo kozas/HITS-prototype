@@ -38,6 +38,9 @@ static func execute(sim, b, o) -> bool:
 		o.facing_reason = d.reason
 	var facing: float = o.facing
 	var slots: Array = sim.assign_slots(bns, dest, facing, ft)
+	# One way of marching for the whole brigade, so it moves (and dresses) as one.
+	var march: int = BattalionBrain.choose_march(sim, bns, b.position(), dest, ft, o.march_ftype)
+	o.march_ftype = march
 	for k in bns.size():
 		var f = bns[k]
 		f.station = slots[k]
@@ -46,7 +49,7 @@ static func execute(sim, b, o) -> bool:
 		BattalionBrain.apply_standing(f, o.kind, o.intensity)
 		BattalionBrain.apply_preferences(sim, f, o)
 		if not f.routing:
-			_to_station(sim, f)
+			_to_station(sim, f, march)
 	return true
 
 
@@ -100,8 +103,8 @@ static func _dress(b, o) -> void:
 			m[0].pace_mul = DRESS_HURRY
 
 
-static func _to_station(sim, f) -> void:
-	BattalionBrain.march_to(sim, f, f.station, f.station_facing, f.station_ftype)
+static func _to_station(sim, f, march := Order.AUTO) -> void:
+	BattalionBrain.march_to(sim, f, f.station, f.station_facing, f.station_ftype, march)
 
 
 static func _prevailing_ftype(bns: Array) -> int:

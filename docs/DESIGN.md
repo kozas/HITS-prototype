@@ -136,7 +136,7 @@ colours' position, and an estimate of how long a manoeuvre takes. Once a
 manoeuvre is over the shader goes back to computing a single formation per
 man. Also drawn: a light company out in open order as skirmishers (pairs in a
 chain, a support behind), and the rout scatter and rally as a function of time.
-Not yet done: closed columns, and men facing about to step back.
+Not yet done: closed columns.
 
 ---
 
@@ -280,18 +280,51 @@ that point, or after 90 s out of danger, faster near its brigadier and his
 steady battalions. Then it re-forms in line, with its morale capped at 0.6 (and
 lower each further time). Panic spreads between formed battalions within 300 m.
 
+**Marching.** How a unit gets somewhere is its commander's choice unless the
+order says otherwise ("March in": line, column or route column). A brigade
+chooses once for all its battalions, so they move, and dress, as one.
+
+| Way of marching | Chosen when | Pace |
+|---|---|---|
+| Route column | a march over 800 m with no formed enemy within 1.5 km of either end | quick step |
+| In line, keeping its front | a line in contact going up to 400 m straight ahead or back | ordinary step; stepping back, a little slower |
+| By the flank | a line shifting sideways up to 150 m | quick step |
+| As it stands | a column (it deploys on arrival), or any short move | |
+| Column of attack | anything else, deploying on arrival | quick step |
+
+A line keeps its front all the way: if the new front is more than 30° off the
+old one it wheels first, then marches straight to its place. Columns turn their
+head the way they go. While marching, the men face the way they go (right or
+left face by the flank, about face stepping back) and front again at the halt.
+That is one instance uniform (`march_dir`) and no per-man state.
+
 **Skirmishers.** The light company (company 0: the voltigeurs on the left, or
 the British light company) leaves as a formation of its own in **open order**:
-a chain of pairs 4 m apart, with a quarter of the company in support 40 m
-behind. It works 150 m ahead of its battalion. The battalion keeps the
-company's places in its ranks, so its geometry doesn't shift. The skirmishers
-take 30% of the hits a formed battalion would, and fire at will. Formed troops
-pay them little heed: they don't halt or charge for skirmishers, and fire on
-them only if nothing formed is in range. The company runs back and rejoins its
-battalion, with its survivors, when it is called in, when formed enemy comes
-within 120 m, or when the battalion forms square or march column. With
-skirmishers on Auto, a battalion attacking or holding throws them out by itself
-when formed enemy is 300–800 m away.
+a chain of pairs, with a quarter of the company in support 40 m behind.
+
+- **The screen.** It keeps its post 150 m ahead of its battalion's front,
+  parallel to it, and stretched (3–10 paces between pairs) to cover the
+  battalion's frontage. It re-aims at the post every second, so it moves up
+  ahead of the battalion as the battalion advances, and falls back as it
+  retires.
+- **Movement.** Open order never wheels as a body: the men run where they must
+  while the chain keeps the battalion's front. It halts only at its post, or
+  where formed enemy won't let it go further.
+- **Firing.** It fires at will whenever it is standing, at enemy skirmishers
+  first (the skirmish fight), then at formed troops, where each man it hits
+  shakes the target half as much again (officers and file-closers picked off).
+- **Being fired on.** It takes 30% of the hits a formed battalion would.
+- **The battalion's ranks.** The battalion keeps the company's places in its
+  ranks, so its geometry doesn't shift.
+- **Formed troops** pay skirmishers little heed: they don't halt or charge for
+  them, and fire on them only if nothing formed is in range. A battalion
+  **holds its fire while its own skirmishers are in front of it**.
+- **Rejoining.** The company runs back and rejoins, with its survivors, when it
+  is called in, when formed enemy comes within 120 m of the chain, when the
+  battalion forms square or march column, or when the battalion comes up to
+  within 60 m of its screen.
+- **On Auto,** a battalion attacking or holding throws its skirmishers out by
+  itself when formed enemy is 300–800 m away.
 
 **Detachment.** An order that skips the recipient's own commander (the general
 ordering a battalion directly) detaches the unit: its parent leaves it alone

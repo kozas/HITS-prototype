@@ -17,6 +17,10 @@ const Orientation = preload("res://src/orientation.gd")
 const Order = preload("res://src/order.gd")
 const Objective = preload("res://src/objective.gd")
 const Doctrine = preload("res://src/ai/doctrine.gd")
+const BattalionBrain = preload("res://src/ai/battalion_brain.gd")
+## The "March in" row: Auto, line, column of attack, route column.
+const MARCH_CHOICES := [Order.AUTO, T.LINE, T.COLUMN, T.MARCH]
+const MARCH_TEXT := {T.LINE: "in line", T.COLUMN: "in column", T.MARCH: "in route column", T.SQUARE: "in square", T.OPEN: "in open order"}
 const T := Formation.Type
 const ZOOM_RANGE := Vector2(1.0, 16.0)
 ## Zoomed in this far, a click picks the battalion rather than its brigade.
@@ -48,6 +52,7 @@ var _draft_kind: int = Order.Kind.MOVE
 var _draft_ftype: int = AUTO
 var _draft_fire: int = AUTO
 var _draft_skirm: int = AUTO
+var _draft_march: int = AUTO
 var _draft_intensity: int = Order.Intensity.PRESS
 var _draft_dest := Vector2.ZERO
 var _draft_facing := 0.0  # the front the unit would likely choose if it acted now
@@ -60,6 +65,7 @@ var _kind_buttons: Array = []
 var _ftype_buttons: Array = []
 var _fire_buttons: Array = []
 var _skirm_buttons: Array = []
+var _march_buttons: Array = []
 var _intensity_buttons: Array = []
 var _intensity_row: Control
 var _skirm_row: Control
@@ -112,6 +118,7 @@ func _build_popup() -> void:
 	for k in range(1, 5):
 		ftypes[k] = "%d %s" % [k, ftypes[k]]
 	_ftype_buttons = _choice_row(col, "Formation", ftypes, func(i): set_draft_ftype(i - 1))[0]
+	_march_buttons = _choice_row(col, "March in", ["Auto", "Line", "Column", "Route column"], func(i): _draft_march = MARCH_CHOICES[i])[0]
 	_fire_buttons = _choice_row(col, "Fire", ["Auto"] + Array(Formation.FIRE_NAMES), func(i): _draft_fire = i - 1)[0]
 	var sk := _choice_row(col, "Skirmishers", ["Auto", "Out", "In"], func(i): _draft_skirm = [AUTO, 1, 0][i])
 	_skirm_buttons = sk[0]
@@ -226,6 +233,8 @@ func _set_draft_target(screen: Vector2) -> void:
 		_fire_buttons[0].button_pressed = true
 		_draft_skirm = AUTO
 		_skirm_buttons[0].button_pressed = true
+		_draft_march = AUTO
+		_march_buttons[0].button_pressed = true
 		_draft_intensity = Order.Intensity.PRESS
 		_intensity_buttons[_draft_intensity].button_pressed = true
 	if enemy != null:
@@ -261,6 +270,7 @@ func issue_draft() -> void:
 	o.ftype = _draft_ftype
 	o.fire_mode = _draft_fire
 	o.skirmishers = _draft_skirm
+	o.march_ftype = _draft_march
 	o.intensity = _draft_intensity
 	main.send_player_order(o)
 	cancel_draft()
@@ -308,7 +318,11 @@ func _update_draft() -> void:
 			_popup_title.text = "%s: rejoin %s" % [u.title, u.parent.label]
 		_:
 			_popup_title.text = "%s: march %s, then form" % [u.title, dist]
-	_popup_front.text = "Front at the commander's discretion: likely %s" % front
+	var units: Array = u.battalions_all().filter(func(f): return not f.dead and (not f.detached or f == u))
+	var march := _draft_shape
+	if not units.is_empty():
+		march = BattalionBrain.choose_march(sim, units, from, _draft_dest, _draft_shape, _draft_march)
+	_popup_front.text = "Marches %s. Front at the commander's discretion: likely %s" % [MARCH_TEXT.get(march, "as it stands"), front]
 	if bn and not u.detached and u.parent != null:
 		_popup_front.text += "\nOrdering a battalion directly detaches it from %s." % u.parent.label
 	# Beside the objective, flipped to the other side near the map's edges.

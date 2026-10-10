@@ -1,12 +1,15 @@
 extends SceneTree
 ## Visual review of the battalion's new drill on Brigade contact. Needs a window:
-##   godot --path hits-prototype --resolution 1600x900 --script res://tools/fire_shots.gd -- --out=DIR [--part=fire|skirmish]
+##   godot --path hits-prototype --resolution 1600x900 --script res://tools/fire_shots.gd -- --out=DIR [--part=fire|skirmish|march]
 ## fire: the French line is moved up to 130 m from the Allied line; its four
 ##   battalions fire by volley, by platoon, at will and by volley, while the
 ##   British reply (an opening volley, then by platoons). Then the right-hand
 ##   French battalion charges.
 ## skirmish: both brigades throw out their light companies at 600 m: the chain
-##   running out, the screen established, and the opposing screens at work.
+##   running out, the screen established; then the French brigade advances
+##   200 m in line and its screen moves up ahead of it.
+## march: the ways a line moves: by the flank (men faced right), stepping back
+##   (faced about) and advancing, all keeping their front.
 
 const Formation = preload("res://src/formation.gd")
 const Order = preload("res://src/order.gd")
@@ -45,6 +48,8 @@ func _process(_d: float) -> bool:
 		battle.time_scale_idx = 1
 		if part == "fire":
 			_setup_fire(sim)
+		elif part == "march":
+			_setup_march(sim)
 		else:
 			_setup_skirmish(sim)
 	if _shot_in > 0:
@@ -111,9 +116,11 @@ func _charge(sim, f, target) -> void:
 
 
 func _setup_skirmish(sim) -> void:
+	# From the brigadier, so the battalions stay his to move later.
 	for f in _french(sim):
-		var o = sim.new_order(f, Order.Kind.HOLD, Objective.point(f.pos))
+		var o = sim.new_order(f, Order.Kind.HOLD, Objective.point(f.pos), sim.brigades[0])
 		o.skirmishers = 1
+		o.facing = f.facing
 		sim._hand_over(o, 0.0)
 	var fr: Array = _french(sim)
 	var br: Array = _british(sim)
@@ -125,9 +132,50 @@ func _setup_skirmish(sim) -> void:
 		[170.0, "02_screen_out", func(): _cam_over(fr[1].pos + Vector2(240, 60), fr[1].pos + Vector2(0, -150), 50.0)],
 		[175.0, "03_screen_close", func(): _cam_close(fr[1].skirmishers if fr[1].skirmishers else fr[1])],
 		[180.0, "04_both_screens", func(): _cam_over(mid + Vector2(420, 120), mid, 140.0)],
-		[230.0, "05_british_screen_close", func(): _cam_close(br[1].skirmishers if br[1].skirmishers else br[1])],
-		[240.0, "06_top_down", func(): battle.free_cam.place(Vector3(mid.x, battle.terrain.height(mid.x, mid.y) + 520.0, mid.y), 0.0, -PI * 0.5 + 0.001)],
+		[200.0, "05_top_down", func(): _top(mid, 520.0)],
+		[205.0, "06_advance_ordered", func(): _advance(sim, 200.0)],
+		[300.0, "07_advancing_top", func(): _top(mid, 520.0)],
+		[330.0, "08_advancing_screen", func(): _cam_over(fr[1].pos + Vector2(220, 40), fr[1].pos + Vector2(0, -120), 45.0)],
+		[460.0, "09_arrived_top", func(): _top(mid, 520.0)],
 	]
+
+
+func _advance(sim, metres: float) -> void:
+	var b = sim.brigades[0]
+	var o = sim.make_order(b, b.centroid() + Vector2(0, -metres), Formation.Type.LINE)
+	o.skirmishers = 1
+	sim._hand_over(o, sim.time)
+	_top((_french(sim)[1].pos + _british(sim)[1].pos) * 0.5, 520.0)
+
+
+func _setup_march(sim) -> void:
+	var fr: Array = _french(sim)
+	var moves := [fr[0].right() * 100.0, fr[1].back() * 120.0, fr[2].forward() * 150.0, fr[3].forward() * 150.0]
+	for k in fr.size():
+		var o = sim.make_order(fr[k], fr[k].pos + moves[k], Formation.Type.LINE, fr[k].facing, sim.brigades[0])
+		o.skirmishers = 0
+		sim._hand_over(o, 0.0)
+	shots = [
+		[25.0, "00_by_the_flank", func(): _cam_close(fr[0])],
+		[27.0, "01_by_the_flank_side", func(): _cam_side(fr[0])],
+		[30.0, "02_stepping_back", func(): _cam_close(fr[1])],
+		[33.0, "03_advancing", func(): _cam_close(fr[2])],
+		[36.0, "04_top", func(): _top(fr[1].pos + Vector2(0, -40), 260.0)],
+		[200.0, "05_halted_fronted", func(): _cam_close(fr[1])],
+	]
+
+
+## Level with a battalion's right-hand file, a few paces off its right flank,
+## looking back along the front: a battalion marching by the right flank comes
+## towards the camera, the men showing their faces.
+func _cam_side(f) -> void:
+	var c: Vector2 = f.pos + f.right() * (f.footprint().x * 0.5 + 8.0) + f.back() * 1.0
+	var l: Vector2 = f.pos + f.back() * 1.0 - c
+	battle.free_cam.place(Vector3(c.x, battle.terrain.height(c.x, c.y) + 1.8, c.y), atan2(-l.x, -l.y), -0.05)
+
+
+func _top(at: Vector2, h: float) -> void:
+	battle.free_cam.place(Vector3(at.x, battle.terrain.height(at.x, at.y) + h, at.y), 0.0, -PI * 0.5 + 0.001)
 
 
 ## Low behind a battalion's line, looking along it towards another.

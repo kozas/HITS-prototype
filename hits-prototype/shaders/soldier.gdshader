@@ -25,7 +25,8 @@ uniform float sim_time = 0.0;
 uniform bool staff = false;
 
 // x = formation from, y = formation to, z = time the order was given (sim s),
-// w = companies away (bit k: company k detached as skirmishers, not drawn here)
+// w = companies away (bit k: company k detached as skirmishers, not drawn here);
+//     in open order instead: metres between pairs in the chain
 instance uniform vec4 form_state = vec4(1.0, 1.0, -1000.0, 0.0);
 // x = strength, y = ranks, z = seed, w = companies
 instance uniform vec4 form_dims = vec4(600.0, 3.0, 0.0, 6.0);
@@ -35,6 +36,9 @@ instance uniform vec4 anim_state = vec4(0.0, -1000.0, 0.0, 1.0);
 // x = time the battalion last started or stopped marching,
 // y = fire (0 volley, 1 by platoon, 2 at will), z = continuous fire began, w = ended
 instance uniform vec4 drill_state = vec4(-1000.0, 0.0, -1000.0, -1000.0);
+// Which way the men face while the battalion marches, relative to its front
+// (shader yaw sense): 0 ahead, PI about face, +-PI/2 by the flank.
+instance uniform float march_dir = 0.0;
 instance uniform vec4 coat_color = vec4(0.02, 0.03, 0.15, 1.0);
 instance uniform vec4 trim_color = vec4(0.7, 0.7, 0.65, 1.0);
 instance uniform vec4 trouser_color = vec4(0.7, 0.7, 0.65, 1.0);
@@ -85,6 +89,7 @@ varying float v_part;
 
 struct Bn {
 	int n;       // men laid out
+	float gap;   // open order: metres between pairs
 	int r;       // ranks
 	int c;       // companies
 	int pc;      // men per company
@@ -129,6 +134,7 @@ float mix_angle(float a, float b, float t) {
 Bn bn_make(int n, int r, int c) {
 	Bn b;
 	b.n = n;
+	b.gap = SKIRMISH_GAP;
 	b.r = max(r, 1);
 	b.c = max(c, 2);
 	b.pc = max((n + b.c - 1) / b.c, 1);
@@ -153,7 +159,7 @@ vec2 bn_size(Bn b, int type) {
 		return vec2(2.0 * b.wc, 2.0 * float(b.r) * RANK_D + float(max(b.c / 2 - 2, 0)) * b.wc);
 	} else if (type == OPEN) {
 		int pairs = (b.n - b.n / 4 + 1) / 2;
-		return vec2(max(float(pairs) * SKIRMISH_GAP, 4.0), SUPPORT_DIST + 2.0 * RANK_D);
+		return vec2(max(float(pairs) * b.gap, 4.0), SUPPORT_DIST + 2.0 * RANK_D);
 	}
 	return vec2(b.wr, float(2 * b.c - 1) * b.step_s + b.ddiv);
 }
@@ -168,7 +174,7 @@ vec4 open_pos(Bn b, int i, float ha, float hb) {
 		int pairs = (chain + 1) / 2;
 		int q = i / 2;
 		float partner = float(i % 2);
-		float x = (float(q) - 0.5 * float(pairs - 1)) * SKIRMISH_GAP + (ha - 0.5) * 2.4 + partner * 0.9;
+		float x = (float(q) - 0.5 * float(pairs - 1)) * b.gap + (ha - 0.5) * 0.6 * b.gap + partner * 0.9;
 		float z = (hb - 0.5) * 3.0 + partner * 0.5;
 		return vec4(x, z, (ha - 0.5) * 0.7, 0.0);
 	}
@@ -341,6 +347,9 @@ void vertex() {
 	Bn b = bn_make(int(form_dims.x + 0.5), int(form_dims.y + 0.5), int(form_dims.w + 0.5));
 	int fa = int(form_state.x + 0.5);
 	int fb = int(form_state.y + 0.5);
+	if (fb == OPEN && form_state.w > 0.5) {
+		b.gap = form_state.w;
+	}
 	uint seed = uint(form_dims.z) * 7919u + uint(i) * 2654435761u + (staff ? 104729u : 0u);
 	float h1 = hash_f(seed);
 	float h2 = hash_f(seed + 1u);
@@ -398,6 +407,11 @@ void vertex() {
 	vec2 pos = pose.xy;
 	float yaw = pose.z;
 	float transit = pose.w;
+	// On the march the men face the way they go (right or left face, about
+	// face), turning as they step off and fronting again at the halt.
+	float since_move = clamp((sim_time - drill_state.x) / FACE_T, 0.0, 1.0);
+	float faced = anim_state.x > 0.5 ? smoothstep(0.0, 1.0, since_move) : 1.0 - smoothstep(0.0, 1.0, since_move);
+	yaw += march_dir * faced * (1.0 - transit);
 
 	// Rout: scatter, turn about and run; rallying, close up again.
 	float rz = anim_state.z;
@@ -438,7 +452,7 @@ void vertex() {
 	bool mounted = role == 3;
 	// A company out skirmishing is drawn by its own formation, not here.
 	int away_company = staff ? (i < 5 * b.c ? i / 5 : -1) : k;
-	bool away = away_company >= 0 && ((int(form_state.w + 0.5) >> away_company) & 1) == 1;
+	bool away = fb != OPEN && away_company >= 0 && ((int(form_state.w + 0.5) >> away_company) & 1) == 1;
 	// Skirmishers have no colours, chef or adjutants with them.
 	away = away || (staff && fb == OPEN && i >= 5 * b.c);
 	if (away || ((mask >> part) & 1) == 0) {

@@ -266,7 +266,7 @@ func _push(e: Entry) -> void:
 	var f: Formation = e.f
 	f.render_dirty = false
 	var cadence: float = f.speed() / Formation.ORDINARY_STEP if f.moving else 1.0
-	var form_state := Vector4(f.ftype_from, f.ftype, f.trans_start, f.absent_mask)
+	var form_state := Vector4(f.ftype_from, f.ftype, f.trans_start, f.open_gap if f.ftype == T.OPEN else f.absent_mask)
 	var form_dims := Vector4(f.layout_strength(), f.ranks, f.id, f.companies)
 	var anim_state := Vector4(1.0 if f.moving else 0.0, f.last_volley, f.rout_t, cadence)
 	var continuous: bool = f.fire_now == Formation.Fire.PLATOON or f.fire_now == Formation.Fire.AT_WILL
@@ -276,6 +276,7 @@ func _push(e: Entry) -> void:
 		node.set_instance_shader_parameter("form_dims", form_dims)
 		node.set_instance_shader_parameter("anim_state", anim_state)
 		node.set_instance_shader_parameter("drill_state", drill_state)
+		node.set_instance_shader_parameter("march_dir", -f.march_dir)  # the shader turns the other way
 	e.mm.visible_instance_count = f.layout_strength()
 	var fp: Vector2 = f.footprint()
 	e.ribbon.set_instance_shader_parameter("ribbon_dims", Vector4(fp.x, fp.y, 0.0, 0.0))

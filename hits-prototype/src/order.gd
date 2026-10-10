@@ -31,6 +31,7 @@ var intensity: int = Intensity.PRESS
 var ftype: int = AUTO       # preferred formation (Formation.Type)
 var fire_mode: int = AUTO   # preferred fire (Formation.Fire)
 var skirmishers: int = AUTO # 1 out, 0 in
+var march_ftype: int = AUTO # how to march there (Formation.Type: line, column or march)
 var status: int = Status.WRITTEN
 var issued := 0.0
 var delivered := -1.0

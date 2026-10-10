@@ -77,6 +77,9 @@ class Courier:
 
 ## Moves to the rear shorter than this are made stepping back, front to the enemy.
 const BACKSTEP_DISTANCE := 400.0
+## A line whose new front is further off its present one than this wheels to
+## it before it moves; nearer, it eases round on the march.
+const WHEEL_FIRST := PI / 6.0  # 30 degrees
 const COURIER_SPEED := 6.5  # m/s, a hard canter over broken ground (~23 km/h)
 const COURIER_HAZARD_RADIUS := 140.0
 const COURIER_HAZARD_PER_SEC := 0.03
@@ -524,9 +527,11 @@ func nearest_enemy(p: Vector2, army: int, radius: float, formed := false):
 	return scan_formed if formed else scan_any
 
 
-## Results of the last scan_enemies(): nearest formed enemy, nearest of any kind.
+## Results of the last scan_enemies(): nearest formed enemy, nearest of any
+## kind, nearest skirmishers.
 var scan_formed = null
 var scan_any = null
+var scan_open = null
 
 
 ## One pass over the grid cells round `p` (no arrays built): sets scan_formed
@@ -535,8 +540,10 @@ var scan_any = null
 func scan_enemies(p: Vector2, army: int, radius: float) -> void:
 	scan_formed = null
 	scan_any = null
+	scan_open = null
 	var bf := radius * radius
 	var ba := bf
+	var bo := bf
 	var rings := 1 if radius <= 360.0 else ceili(radius / CELL)
 	var cx := floori(p.x / CELL)
 	var cz := floori(p.y / CELL)
@@ -552,9 +559,13 @@ func scan_enemies(p: Vector2, army: int, radius: float) -> void:
 				if d2 < ba:
 					ba = d2
 					scan_any = e
-				if d2 < bf and e.ftype != T.OPEN:
-					bf = d2
-					scan_formed = e
+				if e.ftype != T.OPEN:
+					if d2 < bf:
+						bf = d2
+						scan_formed = e
+				elif d2 < bo:
+					bo = d2
+					scan_open = e
 
 
 ## Orders whose staff work is done are acted on, oldest first.
@@ -671,17 +682,29 @@ func _move(f: Formation, dt: float) -> void:
 				f.begin_transition(f.march_ftype, time)
 			elif f.halted or f.pace_mul <= 0.0:
 				pass # halted to give fire, or waiting for the line to come up
+			elif _keeps_front(f, to, dist):
+				# A line keeps its front: if the new front is well off the old it
+				# wheels first, then marches straight to its place, advancing or
+				# stepping back in line or, for a lateral shift, by the flank. The
+				# men face the way they march (march_dir) and front at the halt.
+				# Squares, skirmishers and anyone falling back do the same.
+				var turn := angle_difference(f.facing, f.target_facing)
+				f.facing += clampf(turn, -maxturn, maxturn)
+				f.moving = true
+				if f.ftype != T.LINE or absf(turn) <= WHEEL_FIRST:
+					var rel := angle_difference(f.facing, atan2(-to.x, -to.y))
+					var spd := f.speed()
+					if f.ftype == T.LINE and not f.retiring and absf(rel) > PI * 0.25 and absf(rel) < PI * 0.75:
+						spd = Formation.QUICK_STEP  # by the flank: files at the quick step
+					f.pos += to / dist * minf(spd * f.slope_factor * f.pace_mul * dt, dist)
+					_set_march_dir(f, rel)
 			else:
-				# Close to its place a line sidesteps rather than wheels; a battalion
-				# falling back, or going a short way to the rear, steps back still
-				# facing the enemy instead of wheeling about.
-				var sidestep: bool = (f.ftype == T.LINE and dist < 60.0) or f.retiring \
-					or (dist < BACKSTEP_DISTANCE and f.ftype != T.MARCH and to.dot(f.forward()) < -0.5 * dist)
-				var want: float = f.target_facing if sidestep else atan2(-to.x, -to.y)
-				var diff := angle_difference(f.facing, want)
+				# Columns: the head leads, turning the way it goes.
+				var diff := angle_difference(f.facing, atan2(-to.x, -to.y))
 				f.facing += clampf(diff, -maxturn, maxturn)
 				f.moving = true
-				if absf(diff) < 0.5 or sidestep:
+				_set_march_dir(f, 0.0)
+				if absf(diff) < 0.5:
 					f.pos += to / dist * minf(f.speed() * f.slope_factor * f.pace_mul * dt, dist)
 		elif f.ftype != f.target_ftype:
 			f.begin_transition(f.target_ftype, time)
@@ -697,6 +720,37 @@ func _move(f: Formation, dt: float) -> void:
 	f.pos = f.pos.clamp(Vector2(-MAP_LIMIT, -MAP_LIMIT), Vector2(MAP_LIMIT, MAP_LIMIT))
 	if f.moving != was_moving:
 		f.moving_since = time
+		f.render_dirty = true
+
+
+## Does the unit march keeping its front (rather than turning its head to the
+## way it goes, as a column does)? Lines, squares and skirmishers always; any
+## battalion falling back; and a column going a short way to the rear, which
+## faces about rather than countermarching.
+func _keeps_front(f: Formation, to: Vector2, dist: float) -> bool:
+	match f.ftype:
+		T.LINE, T.SQUARE, T.OPEN:
+			return true
+		T.MARCH:
+			return f.retiring
+	return f.retiring or (dist < BACKSTEP_DISTANCE and to.dot(f.forward()) < -0.5 * dist)
+
+
+## Which way the men face while marching, relative to the front (the shader
+## turns them). A formed battalion faces by the drill: front, right or left
+## face, or about face. Skirmishers just face the way they run.
+func _set_march_dir(f: Formation, rel: float) -> void:
+	var q: float
+	if f.ftype == T.OPEN:
+		q = snappedf(rel, PI / 12.0)
+	elif absf(rel) <= PI * 0.25:
+		q = 0.0
+	elif absf(rel) >= PI * 0.75:
+		q = PI
+	else:
+		q = signf(rel) * PI * 0.5
+	if q != f.march_dir:
+		f.march_dir = q
 		f.render_dirty = true
 
 
@@ -777,6 +831,8 @@ func volley(f: Formation, e: Formation, d: float) -> void:
 func continuous_fire(f: Formation, e: Formation, d: float, t0: float, t1: float) -> void:
 	var p: float = hit_chance(f, e, d) * BattalionBrain.ACCURACY[f.fire_now]
 	var shock: float = BattalionBrain.SHOCK[f.fire_now]
+	if f.is_skirmisher and e.ftype != T.OPEN:
+		shock *= SKIRMISH_SHOCK  # they pick off the officers and file-closers
 	var c: int = f.companies
 	if f.fire_now == F.PLATOON:
 		var step := Formation.PLATOON_CYCLE / c
@@ -798,6 +854,27 @@ func continuous_fire(f: Formation, e: Formation, d: float, t0: float, t1: float)
 		_owe_hits(f, e, t1, shock, share)
 		events.append({"type": "fire", "f": f, "k": -1, "t": t0})
 		f.last_shot = t1
+
+
+## Skirmish fire on formed troops shakes them more per man hit.
+const SKIRMISH_SHOCK := 1.5
+
+
+## Would `f` fire through its own side's skirmishers to hit `e` at `d`? True if
+## any are between them, across the line of fire.
+func masked(f: Formation, e: Formation, d: float) -> bool:
+	var dir := (e.cpos - f.cpos) / maxf(d, 0.1)
+	var side := dir.orthogonal()
+	for s: Formation in neighbours(f.cpos):
+		if s.army != f.army or s.ftype != T.OPEN or s.dead:
+			continue
+		var v: Vector2 = s.pos - f.cpos
+		var along := v.dot(dir)
+		if along <= 0.0 or along >= d - 5.0:
+			continue
+		if absf(v.dot(side)) < (s.fp.x + f.fp.x) * 0.4:
+			return true
+	return false
 
 
 ## Pays the whole casualties out of the fractional account, so small companies
@@ -910,9 +987,10 @@ func set_skirmishers(f: Formation, out: bool) -> void:
 	s.fire_auto = false
 	s.fire_mode = F.AT_WILL
 	s.activity = Formation.Activity.SKIRMISHING
+	BattalionBrain.set_screen_width(s, f)
 	s.refresh_shape()
 	s.cpos = s.center()
-	BattalionBrain.march_to(self, s, f.pos + f.forward() * BattalionBrain.SCREEN_DEPTH, f.facing, T.OPEN)
+	BattalionBrain.march_to(self, s, f.pos + f.forward() * BattalionBrain.SCREEN_DEPTH, f.facing, T.OPEN, T.OPEN)
 	f.strength -= men
 	f.held_out = men
 	f.absent_mask |= 1

@@ -17,14 +17,17 @@ const GUARD_W := 1.2
 const ORDINARY_STEP := 0.82  # pas ordinaire: 76 paces/min of 0.65 m
 const QUICK_STEP := 1.08     # pas accéléré: 100 paces/min
 const CHARGE_STEP := 1.45    # pas de charge: 120 paces/min, breaking into a run
+const SKIRMISH_STEP := 1.3   # light infantry in open order, at the double when needed
 const ROUT_SCATTER_T := 8.0  # seconds for a routing battalion to scatter fully
 const RALLY_REFORM_T := 15.0 # seconds for a rallying battalion to re-form
 ## Fire cycles (s): a company's turn comes round, or a man reloads, this often.
 const PLATOON_CYCLE := 20.0
 const AT_WILL_CYCLE := 16.0
-## Open order (mirrors soldier.gdshader): pairs this far apart, and a quarter of
-## the company kept back as a support this far behind the chain.
+## Open order (mirrors soldier.gdshader): pairs this far apart by default (the
+## chain stretches to cover its battalion's front, between the two limits), and
+## a quarter of the company kept back as a support this far behind the chain.
 const SKIRMISH_GAP := 4.0
+const SKIRMISH_GAP_RANGE := Vector2(2.0, 6.5)  # 3 to 10 paces
 const SUPPORT_DIST := 40.0
 const OPEN_FORM_T := 12.0  # seconds for a company to run out into open order
 
@@ -65,6 +68,9 @@ var slope_factor := 1.0
 var pace_mul := 1.0
 ## Stepping back facing the enemy (falling back in order), not turning to march.
 var retiring := false
+## Which way the men face while marching, relative to the front (radians, Godot
+## sense): 0 ahead, PI about, +-PI/2 by the flank. Drawn by the shader.
+var march_dir := 0.0
 
 # --- morale: how steady the men are, apart from what they are doing
 enum Morale { STEADY, SHAKEN, ROUTING, RALLYING, BROKEN }
@@ -133,6 +139,8 @@ var skirmishers = null  # its light company out as a skirmish screen (a Formatio
 ## This is a light company out skirmishing (`parent` is its battalion).
 var is_skirmisher := false
 var recalled := false   # skirmishers called in: running back to rejoin
+var open_gap := SKIRMISH_GAP  # skirmishers: metres between pairs in the chain
+var screen_out := false  # skirmishers: have reached their post once
 ## Throws out its skirmishers by itself when the enemy is near (doctrine).
 var skirmish_auto := false
 var skirmish_next := 0.0  # not again before this (just called in)
@@ -180,7 +188,7 @@ func layout_strength() -> int:
 
 
 func footprint_as(type: int) -> Vector2:
-	return footprint_for(type, layout_strength(), ranks, companies)
+	return footprint_for(type, layout_strength(), ranks, companies, open_gap)
 
 
 func forward() -> Vector2:
@@ -264,8 +272,10 @@ func speed() -> float:
 	match ftype:
 		Type.LINE:
 			return ORDINARY_STEP
-		Type.COLUMN, Type.MARCH, Type.OPEN:
+		Type.COLUMN, Type.MARCH:
 			return QUICK_STEP
+		Type.OPEN:
+			return SKIRMISH_STEP
 		_:
 			return 0.15
 
@@ -305,7 +315,7 @@ func transition_time(a: int, b: int) -> float:
 
 ## (width, depth) in metres; the anchor is the centre of the front rank.
 ## Mirrors bn_make / bn_size in soldier.gdshader.
-static func footprint_for(type: int, n: int, rk: int, c: int) -> Vector2:
+static func footprint_for(type: int, n: int, rk: int, c: int, gap := SKIRMISH_GAP) -> Vector2:
 	var g := _geom(n, rk, c)
 	match type:
 		Type.LINE:
@@ -317,7 +327,7 @@ static func footprint_for(type: int, n: int, rk: int, c: int) -> Vector2:
 		Type.OPEN:
 			var support := n / 4
 			var pairs := (n - support + 1) / 2
-			return Vector2(maxf(pairs * SKIRMISH_GAP, 4.0), SUPPORT_DIST + 2.0 * RANK_D)
+			return Vector2(maxf(pairs * gap, 4.0), SUPPORT_DIST + 2.0 * RANK_D)
 		_:
 			return Vector2(g.z, (2 * c - 1) * maxf(g.z, g.y + 3.0) + g.y)
 

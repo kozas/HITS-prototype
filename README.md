@@ -58,7 +58,7 @@ Command-line options (after `--`):
 | W / Shift+W / Ctrl+W | trot / gallop / walk |
 | S, A/D | back up, sidestep |
 | T | telescope: the general halts and raises his glass (4–20×, mouse wheel); detail follows the magnification |
-| M or Tab | map. Wheel zooms at the cursor and dragging (left on empty ground, or middle) pans. LMB selects a brigade; click it again (or click when zoomed in) for one of its battalions. RMB on the ground sets where it goes; RMB on an enemy unit makes it an attack on that unit. The order sheet then sets the order (Move / Attack / Hold, or Rejoin for a detached battalion), the formation (Auto or 1–4: Line / Column / Square / March), fire (Auto / Volley / By platoon / At will / Hold fire), skirmishers (Auto / Out / In) and, for an attack, how hard (Probe / Press / All-out). Issue (Enter) sends a courier; Cancel (Esc). A green ghost shows the unit as it would stand. You don't set a facing: the unit chooses its own front when it acts. A battalion ordered directly is detached from its brigade until its order is done (orange mark) |
+| M or Tab | map. Wheel zooms at the cursor and dragging (left on empty ground, or middle) pans. LMB selects a brigade; click it again (or click when zoomed in) for one of its battalions. RMB on the ground sets where it goes; RMB on an enemy unit makes it an attack on that unit. The order sheet then sets the order (Move / Attack / Hold, or Rejoin for a detached battalion), the formation (Auto or 1–4: Line / Column / Square / March), how to march there (Auto / Line / Column / Route column; Auto lets the commander choose: route column for a long march clear of the enemy, in line for a line's short advance or retreat in contact, by the flank for a short sideways shift, otherwise column of attack), fire (Auto / Volley / By platoon / At will / Hold fire), skirmishers (Auto / Out / In) and, for an attack, how hard (Probe / Press / All-out). Issue (Enter) sends a courier; Cancel (Esc). A green ghost shows the unit as it would stand. You don't set a facing: the unit chooses its own front when it acts. A battalion ordered directly is detached from its brigade until its order is done (orange mark) |
 | O | order of battle: Army > Corps > Division > Brigade > Battalion, with commanders, strength and situation. The enemy shows only as far as he has been seen. Double-click a unit to find it on the map |
 | = / - | time scale (×0.5 … ×16) |
 | P | pause |
@@ -118,10 +118,13 @@ C:/Godot/Godot_v4.6.1-stable_win64_console.exe --headless --path hits-prototype 
 - `determinism_test.gd` checks that the battle depends only on the tick count:
   10 sim-minutes reached in 16 ms frames and in 50 ms frames must leave every
   battalion and courier in exactly the same state.
-- `battalion_test.gd` puts single battalions through each ability on a drill
-  ground (`tools/lab.gd`): form and face, move, halt to fire (probe), charge
-  (all-out), rout and rally, fire at will being slow to stop, and skirmishers
-  out and back with no man lost or gained.
+- `battalion_test.gd` puts single battalions (and a brigade) through each
+  ability on a drill ground (`tools/lab.gd`): form and face, move, halt to fire
+  (probe), charge (all-out), rout and rally, fire at will being slow to stop;
+  marching in line, by the flank and in route column; skirmishers out and back
+  with no man lost or gained, the screen keeping station as its battalion
+  advances, clearing for formed enemy, and a battalion holding its fire while
+  its own skirmishers mask it.
 - `fire_test.gd` compares volley, platoon fire and fire at will at 50, 100 and
   150 m: casualties per minute and the shock to the target per casualty.
 - `charge_test.gd` sends a column in with the bayonet 50 times against a steady
@@ -153,7 +156,9 @@ with an overhead view of the deployment.
 Fire and skirmish review needs a window too. On Brigade contact, `--part=fire`
 brings the lines to 130 m with the French battalions firing by volley, by
 platoon and at will, then sends one in with the bayonet; `--part=skirmish`
-throws out both brigades' light companies:
+throws out both brigades' light companies, then advances the French brigade in
+line with its screen ahead of it; `--part=march` shows a line marching by the
+flank, stepping back and advancing:
 
 ```bash
 C:/Godot/Godot_v4.6.1-stable_win64_console.exe --path hits-prototype --resolution 1600x900 --script res://tools/fire_shots.gd -- --out=shots --part=fire

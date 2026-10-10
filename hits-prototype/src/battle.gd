@@ -575,8 +575,33 @@ func _consume_events() -> void:
 			"order_executing":
 				var o: Order = ev.o
 				if o.by_player() and not bench:
-					hud.toast("%s moves off to form %s, %s" % [o.recipient.label, Formation.TYPE_NAMES[o.ftype].to_lower(), Orientation.describe(o.facing, o.facing_reason)])
+					hud.toast(_dispatch_text(o))
 	sim.events.clear()
+
+
+## What the recipient's aide reports when he starts on one of the general's
+## orders. The front (and formation) may not be settled yet: a routing
+## battalion takes the order but must rally before it can act, and a Rejoin
+## has no front of its own.
+func _dispatch_text(o: Order) -> String:
+	var who: String = o.recipient.label
+	if o.kind == Order.Kind.REJOIN:
+		return "%s rejoins %s" % [who, o.recipient.parent.label if o.recipient.parent else "its brigade"]
+	if o.facing == null:
+		return "%s has your orders, but must rally before it can act on them" % who
+	var form := ""
+	if o.ftype >= 0:
+		form = " in %s" % Formation.TYPE_NAMES[o.ftype].to_lower()
+	var front := Orientation.describe(o.facing, o.facing_reason) if o.facing_reason >= 0 else ""
+	var text: String
+	match o.kind:
+		Order.Kind.ATTACK:
+			text = "%s advances to the attack (%s)%s" % [who, Order.INTENSITY_NAMES[o.intensity].to_lower(), form]
+		Order.Kind.HOLD:
+			text = "%s holds its ground%s" % [who, form]
+		_:
+			text = "%s moves off%s" % [who, " to form " + form.substr(4) if form != "" else ""]
+	return text + (", " + front if front != "" else "")
 
 
 static func _mmss(s: float) -> String:
