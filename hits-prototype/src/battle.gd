@@ -22,10 +22,9 @@ const Order = preload("res://src/order.gd")
 
 const PLAYER_ARMY := 0
 const TIME_SCALES := [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
-## Brigade contact: front rank to front rank at the start. Lines advance at
-## the ordinary step (0.82 m/s) and musketry starts at 180 m centre to centre,
-## so ~30 s to contact.
-const CONTACT_GAP := 202.0
+## Brigade contact: front rank to front rank at the start, well out of musket
+## range, so the general has time to try his orders before the lines meet.
+const CONTACT_GAP := 600.0
 
 var scenario: int = GS.Scenario.BENCHMARK
 var menu_open := false
@@ -162,7 +161,8 @@ func _ready() -> void:
 	else:
 		_capture_mouse()
 		if scenario == GS.Scenario.BRIGADE_CONTACT:
-			hud.toast("11:00. Your brigade is advancing on the Allied line, %d m ahead." % int(CONTACT_GAP))
+			hud.toast("11:00. Your brigade is halted in line, the Allied brigade %d m to the north." % int(CONTACT_GAP))
+			hud.toast("M: map. Click your brigade (again for one battalion), right-click where it should go.")
 		elif corps:
 			map.focus(Vector2(0, 200), 1.8)
 			hud.toast("11:00. %s is halted below your hill. The enemy holds the ridge to the north." % sim.armies[PLAYER_ARMY].subordinates[0].title)
@@ -182,7 +182,7 @@ func _pick_contact_site() -> Vector2:
 			var lo := INF
 			var hi := -INF
 			for sx in range(-8, 9):
-				for sz in [-0.6, -0.3, 0.0, 0.3, 0.6, 0.9, 1.2]:
+				for sz in [-0.65, -0.45, -0.25, 0.0, 0.25, 0.45, 0.65]:
 					var h: float = terrain.height(c.x + sx * 75.0, c.y + sz * CONTACT_GAP)
 					lo = minf(lo, h)
 					hi = maxf(hi, h)
@@ -447,12 +447,13 @@ func _open_overlay(which: Control) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
-## From the order of battle: open the map on a unit.
-func show_on_map(world: Vector2, zoom: float, brigade_id: int) -> void:
+## From the order of battle: open the map on a unit (and select it, if it is
+## one of ours that takes orders on the map).
+func show_on_map(world: Vector2, zoom: float, unit) -> void:
 	_open_overlay(map)
 	map.focus(world, zoom)
-	if brigade_id >= 0:
-		map.select(brigade_id)
+	if unit != null:
+		map.select(unit)
 
 
 func _set_telescope(on: bool) -> void:
@@ -540,6 +541,24 @@ func _consume_events() -> void:
 		match ev.type:
 			"volley":
 				smoke.on_volley(ev.f, ev.t, terrain)
+			"fire":
+				smoke.on_fire(ev.f, ev.k, ev.t, terrain)
+			"formation_spawned":
+				renderer.add_formation(ev.f, sim.brigades[ev.f.brigade])
+			"skirmishers":
+				if ev.f.army == PLAYER_ARMY and not bench:
+					hud.toast(("%s throws out its skirmishers" if ev.out else "%s calls in its skirmishers") % ev.f.label)
+			"rally":
+				if ev.f.army == PLAYER_ARMY and not bench:
+					hud.toast("Battalion %s (%s) has rallied" % [ev.f.label, sim.brigades[ev.f.brigade].label])
+			"charge":
+				if (ev.f.army == PLAYER_ARMY or ev.target.army == PLAYER_ARMY) and not bench:
+					hud.toast("%s charges %s with the bayonet!" % [ev.f.label, ev.target.label])
+			"charge_result":
+				if (ev.f.army == PLAYER_ARMY or ev.target.army == PLAYER_ARMY) and not bench:
+					var what: String = {"broke": "%s breaks before the charge of %s", "recoiled": "%s stops the charge of %s",
+						"won": "%s is driven off by %s", "repulsed": "%s throws back the charge of %s"}[ev.result]
+					hud.toast(what % [ev.target.label, ev.f.label])
 			"casualties":
 				corpses.add(ev.f, ev.n, terrain)
 			"rout":

@@ -134,8 +134,9 @@ organisation. The source is the 1791 French regulations as summarised at
 The CPU only mirrors frontage and depth (`Formation.footprint_for`), the
 colours' position, and an estimate of how long a manoeuvre takes. Once a
 manoeuvre is over the shader goes back to computing a single formation per
-man. Not yet done: voltigeurs thrown out as a skirmish screen, the charge step,
-and closed columns.
+man. Also drawn: a light company out in open order as skirmishers (pairs in a
+chain, a support behind), and the rout scatter and rally as a function of time.
+Not yet done: closed columns, and men facing about to step back.
 
 ---
 
@@ -208,23 +209,104 @@ Army (player = C-in-C)
 
 The prototype models the full chain: army, then corps (4 divisions), then
 division (2 brigades), then brigade, then battalion.
-- **Classes:** `Command` covers every headquarters, and `Brigade` extends it with battalions and orders.
+- **Classes:** `Command` covers every headquarters down to the battalion: `Brigade` extends it with its battalions, and `Formation` (the battalion) extends it too, so every level can receive an order through the same API.
 - **Names:** generated in period style, e.g. "IIe Corps", "Brigade Dumont", "2e bataillon, 45e de Ligne", "Pickering's Brigade", "1st Battalion, 52nd Foot".
 - **Viewer:** the order of battle (O) shows the whole tree. For the enemy it shows only what has been seen, with guessed strengths: it is the player's knowledge, not ground truth.
-- **Orders:** the player still sends orders to brigades only. Passing orders down through corps and division HQs (each adding its own delay and interpretation) is M1.
+- **Orders:** the player sends orders to brigades and to single battalions. Corps and division HQs can already receive orders, but their brains (passing orders down, each adding its own delay and interpretation) come next.
 
 ### Unit state (battalion)
 Position, facing, formation type plus transition (from, to, start, duration),
-strength, morale, fatigue, ammunition, current order, local SOP state
-(engaged / halted / routing), and last volley time.
+strength, morale and **morale state** (steady / shaken / routing / rallying /
+broken), **activity** (idle / manoeuvring / firing / charging / skirmishing),
+fire (mode in use, cycle start and end, last shot), current order and the
+**standing orders** that came with it (halt range, charge threshold, fall-back
+threshold, stand fast), place in the brigade (station), and any company out
+skirmishing. Planned: fatigue and ammunition.
+
+### Who does what
+
+Each level has a brain in `src/ai/`. It turns its current order into orders for
+the level below, or (for a battalion) into drill. Things are decided at the
+lowest level that can see them:
+
+| Capability | Battalion (`battalion_brain.gd`) | Brigade (`brigade_brain.gd`) |
+|---|---|---|
+| Formation and facing | drill; chooses its own front | lays out the brigade |
+| Shooting, target, manner of fire | does it; Auto picks by doctrine | passes the fire preference down |
+| Bayonet charge | decides from its standing orders; the sim plays it out | later: decides when and supports it |
+| Skirmishers | throws out and calls in its light company | passes the preference down; later: the screen as a whole |
+| Rout and rally | runs to a rally point and re-forms there | rallied battalions are sent back to their places |
+| Keeping contact | keeps the pace it is given | **dresses the line**: slows battalions that get ahead |
+| Hold ground | stands, faces threats, returns fire | later: the hold posture for the brigade (front, reserve) |
+
+National doctrine (`doctrine.gd`) is one small table per army, read when an
+order leaves something to Auto. French: attack in column behind voltigeurs; an
+opening volley, then fire at will. British: line; an opening volley, then fire
+by platoons.
+
+**Battalion standing orders** come from the intensity of the order being
+carried out:
+
+| Intensity | Halts to fire at | Charges when enemy morale < | Falls back when own morale < | Launches the charge at |
+|---|---|---|---|---|
+| Probe | 150 m | never | 0.6 | – |
+| Press | 70 m | 0.5 | 0.4 | 80 m |
+| All-out | doesn't halt | always | 0.25 | 150 m |
+
+Moving or holding: halt and return fire at 180 m, never charge, fall back below 0.3.
+
+**Fire.** Volley: the whole battalion at the word, every 18–26 s; the greatest
+shock to the target. By platoon: companies in turn from the right, one every
+20 s ÷ companies, so the fire rolls along the line and some companies are always
+loaded. At will: every man on his own ~16 s cycle, a quarter less accurate, the
+least shock, and hard to stop (orders wait 10–20 s while the men are got in
+hand). The three kill at much the same rate (`fire_test.gd`). The shader draws
+the same schedules from two numbers (start and end of fire), with no per-man
+state.
+
+**Charges** are decided mostly by nerve. The attacker goes in at the pas de
+charge, and fire shakes it half as much as a battalion standing. At 50 m the
+defender tests its steadiness: morale, formation (square best, march column
+worst), loaded muskets, and a flank attack against the attacker's shock. If it
+breaks, the attacker takes its ground. If it stands, it gives a closing volley:
+full if loaded, half from a line firing by platoon, less from men firing at
+will. Then the attacker tests in turn, and either recoils shaken or goes in to
+a 10–30 s melee that the steadier side wins. A routed battalion's attack order
+fails rather than resuming once it has rallied.
+
+**Rout and rally.** A battalion routs below 0.25 morale and breaks for good
+below 15% strength. Routing, it runs 350 m back from the danger. It rallies at
+that point, or after 90 s out of danger, faster near its brigadier and his
+steady battalions. Then it re-forms in line, with its morale capped at 0.6 (and
+lower each further time). Panic spreads between formed battalions within 300 m.
+
+**Skirmishers.** The light company (company 0: the voltigeurs on the left, or
+the British light company) leaves as a formation of its own in **open order**:
+a chain of pairs 4 m apart, with a quarter of the company in support 40 m
+behind. It works 150 m ahead of its battalion. The battalion keeps the
+company's places in its ranks, so its geometry doesn't shift. The skirmishers
+take 30% of the hits a formed battalion would, and fire at will. Formed troops
+pay them little heed: they don't halt or charge for skirmishers, and fire on
+them only if nothing formed is in range. The company runs back and rejoins its
+battalion, with its survivors, when it is called in, when formed enemy comes
+within 120 m, or when the battalion forms square or march column. With
+skirmishers on Auto, a battalion attacking or holding throws them out by itself
+when formed enemy is 300–800 m away.
+
+**Detachment.** An order that skips the recipient's own commander (the general
+ordering a battalion directly) detaches the unit: its parent leaves it alone
+until the order is done, or until it is told to rejoin.
 
 ### Order model
 An order is *intent*, not a waypoint: **objective** (place, or a unit to
 support or attack), **posture** (attack / hold / screen / retire), **formation
 preference**, and **conditions** ("if pressed, fall back on X"). The recipient's
 AI turns it into concrete moves using its personality (initiative, aggression,
-caution). The prototype implements "go to X, form Z", which has the same
-plumbing.
+caution). The prototype implements Move / Attack / Hold (plus Rejoin) at a
+point or against an enemy unit, with **intensity** (probe / press / all-out),
+and with preferences for formation, manner of fire and skirmishers (each Auto
+by default). The objective type already has lines and areas, for the map tool
+that will place objectives.
 
 **Orientation is the unit's call, not the general's.** An order never carries a
 facing. When a brigade acts on an order it chooses its own front
@@ -238,17 +320,20 @@ threats appear, deciding from the commander's own knowledge instead of ground
 truth, refusing a flank, using crests and reverse slopes, and the same rules for
 every level from corps to battalion.
 
-**Writing an order on the map:** select a brigade, right-click the destination,
-choose the formation to take there, then Issue. Nothing happens until Issue:
-only then does the courier ride. On delivery the brigade takes 20–75 s to
-prepare before it moves off. Later the brigade will also re-form for the march
-before stepping off.
+**Writing an order on the map:** select a brigade (click it again for one of
+its battalions), right-click the destination or an enemy unit, fill in the
+order sheet, then Issue. Nothing happens until Issue: only then does the
+courier ride. On delivery there is staff work before the unit moves off, by
+level: a battalion 5–15 s, a brigade 20–75 s, a division 40–120 s, a corps
+1–3 min, shortened or lengthened by the commander's skill. Later the brigade
+will also re-form for the march before stepping off.
 
-### Order lifecycle (implemented in M0)
-`written → issued → riding → delivered → preparing (staff delay) → executing → (complete | superseded)`,
-with `lost` when the courier is killed. Reports flow back the other way: in M1 we
-add periodic ADC reports and "no word from 3rd Brigade" when couriers don't
-return.
+### Order lifecycle
+`written → issued → riding → delivered → preparing (staff delay) → executing → (complete | superseded | failed)`,
+with `lost` when the courier is killed. Only the sim changes an order's status,
+and each change is an event the UI follows. Reports flow back the other way: in
+M1 we add periodic ADC reports and "no word from 3rd Brigade" when couriers
+don't return.
 
 ### Combat (aggregated, not per bullet)
 - **Musketry**: once per reload cycle (~20 s), shooters × hit probability at
@@ -256,8 +341,9 @@ return.
 - **Artillery** (M2): roundshot and canister. A few hundred guns, so individual
   roundshot *can* be real projectiles bouncing through formations. That's cheap
   and spectacular.
-- **Melee / charges** (M2): a state machine between two formations. Squares
-  versus cavalry is a rock-paper-scissors resolved at formation level.
+- **Bayonet charges**: a state machine between two formations, decided mostly
+  by morale before contact (see *Who does what*). Squares against cavalry
+  (M2) is a rock-paper-scissors resolved at formation level.
 - **Morale**: the real decider. Casualties, flank threats, routing neighbours
   and the commander's presence feed in. A rout can cascade.
 
@@ -265,14 +351,20 @@ return.
 
 | System | Rate | Cost driver |
 |---|---|---|
-| Formation movement and SOP | 10 Hz | O(formations) |
-| Spatial hash rebuild | 10 Hz | O(formations) |
-| Separation | 2 Hz | O(formations × neighbours) |
-| Musketry and morale | 1 Hz | O(formations × neighbours) |
-| AI commanders | 0.1–1 Hz, staggered | O(commanders) |
+| Formation movement (drill) | 10 Hz | O(formations) |
+| Couriers, charges | 10 Hz | O(couriers + charges) |
+| Spatial hash rebuild | 2 Hz | O(formations) |
+| Separation (oriented footprints) | 1 Hz, staggered by id | O(formations × neighbours) |
+| Battalion brains: standing orders, musketry, morale | 1 Hz, staggered by id | O(formations × neighbours) |
+| Brigade brains, AI commanders | 1 Hz, staggered by id | O(commanders) |
 | LOS / spotting | round-robin, N per frame | O(N) per frame |
-| Couriers | per frame | O(couriers) |
 | Render sync (transform, LOD, uniforms) | per frame | O(formations) |
+
+"Staggered" means each tick takes the units whose id falls in that tick's tenth,
+so the 1 Hz work is spread evenly. Sim time is `tick_count × 0.1 s`, every random
+draw comes from the sim's seeded generator, and couriers move in the tick, so
+the battle depends only on the tick count, not on the frame rate
+(`determinism_test.gd`).
 
 Determinism matters because **time compression** is required (a 10-hour
 battle), and it also enables replays and, later, lockstep multiplayer.

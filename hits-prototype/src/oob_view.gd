@@ -126,6 +126,8 @@ func _add(parent: TreeItem, node, enemy: bool) -> void:
 	_rows.append([it, node, enemy])
 	if node is Formation:
 		it.set_custom_color(0, DIM)
+		if node.skirmishers != null and not node.skirmishers.dead:
+			_add(it, node.skirmishers, enemy)
 		return
 	# Armies and corps open, divisions and brigades folded, unless changed.
 	it.collapsed = _collapsed.get(node.get_instance_id(), node.level >= Command.Level.DIVISION)
@@ -194,12 +196,20 @@ func _battalion_state(f) -> String:
 	if f.routing:
 		return "ROUTING"
 	var s: String = Formation.TYPE_NAMES[f.ftype]
-	if f.is_transitioning(sim.time):
+	if f.morale_state == Formation.Morale.RALLYING:
+		s = "rallying"
+	elif f.activity == Formation.Activity.CHARGING:
+		s = "CHARGING"
+	elif f.is_transitioning(sim.time):
 		s = "forming " + s.to_lower()
 	elif f.engaged:
-		s += ", engaged"
+		s += ", firing" if f.firing or sim.time - f.last_shot < 25.0 else ", engaged"
 	elif f.moving:
 		s += ", marching"
+	if f.morale_state == Formation.Morale.SHAKEN:
+		s += ", shaken"
+	if f.detached and f.army == battle.PLAYER_ARMY:
+		s += " (detached)"
 	return s
 
 
@@ -240,8 +250,5 @@ func _on_activated() -> void:
 		n += 1
 	if n == 0:
 		return
-	var level: int = 4 if node is Formation else node.level
-	var brigade_id: int = -1
-	if not enemy:
-		brigade_id = node.brigade if node is Formation else (node.id if node is Brigade else -1)
-	battle.show_on_map(c / n, FOCUS_ZOOM[level], brigade_id)
+	var unit = node if not enemy and (node is Formation or node is Brigade) else null
+	battle.show_on_map(c / n, FOCUS_ZOOM[node.level], unit)

@@ -72,6 +72,11 @@ func setup(t, formations: Array, brigades: Array) -> void:
 		_create(f, brigades[f.brigade])
 
 
+## A formation that joined the battle after setup (skirmishers thrown out).
+func add_formation(f, b) -> void:
+	_create(f, b)
+
+
 ## Drives every soldier animation; call once per frame with the render-time clock.
 func set_sim_time(t: float) -> void:
 	soldier_mat.set_shader_parameter("sim_time", t)
@@ -124,7 +129,9 @@ func _create(f, b) -> void:
 	e.mmi = MultiMeshInstance3D.new()
 	e.mmi.multimesh = e.mm
 	e.mmi.material_override = soldier_mat
-	e.mmi.custom_aabb = AABB(Vector3(-140, -40, -60), Vector3(280, 80, 260))
+	# Big enough for any formation it can take (open order is the widest).
+	var half_w: float = maxf(140.0, f.footprint_as(T.OPEN).x * 0.5 + 20.0) if f.is_skirmisher else 140.0
+	e.mmi.custom_aabb = AABB(Vector3(-half_w, -40, -60), Vector3(half_w * 2.0, 80, 260))
 	e.root.add_child(e.mmi)
 
 	# 5 per company (captain, lieutenant, 2 sergeants, drummer) + 12 battalion staff.
@@ -142,7 +149,7 @@ func _create(f, b) -> void:
 	e.ribbon = MeshInstance3D.new()
 	e.ribbon.mesh = mesh_ribbon
 	e.ribbon.material_override = ribbon_mat
-	e.ribbon.custom_aabb = AABB(Vector3(-140, -40, -60), Vector3(280, 80, 260))
+	e.ribbon.custom_aabb = e.mmi.custom_aabb
 	e.ribbon.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	e.root.add_child(e.ribbon)
 
@@ -244,8 +251,9 @@ func _apply_tier(e: Entry, t: int) -> void:
 	var men := t <= Tier.FAR
 	e.mmi.visible = men
 	e.staff.visible = t <= Tier.MID
-	e.ribbon.visible = t == Tier.RIBBON
-	e.flag.visible = t != Tier.RIBBON
+	# Skirmishers carry no colours, and a scattered chain is no solid block.
+	e.ribbon.visible = t == Tier.RIBBON and not e.f.is_skirmisher
+	e.flag.visible = t != Tier.RIBBON and not e.f.is_skirmisher
 	if men:
 		e.mm.mesh = tier_meshes[t]
 		var shadow := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if t == Tier.NEAR else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -258,16 +266,17 @@ func _push(e: Entry) -> void:
 	var f: Formation = e.f
 	f.render_dirty = false
 	var cadence: float = f.speed() / Formation.ORDINARY_STEP if f.moving else 1.0
-	var form_state := Vector4(f.ftype_from, f.ftype, f.trans_start, f.trans_dur)
-	var form_dims := Vector4(f.strength, f.ranks, f.id, f.companies)
-	var anim_state := Vector4(1.0 if f.moving else 0.0, f.last_volley, f.rout_amount, cadence)
-	var drill_state := Vector4(f.moving_since, 0.0, 0.0, 0.0)
+	var form_state := Vector4(f.ftype_from, f.ftype, f.trans_start, f.absent_mask)
+	var form_dims := Vector4(f.layout_strength(), f.ranks, f.id, f.companies)
+	var anim_state := Vector4(1.0 if f.moving else 0.0, f.last_volley, f.rout_t, cadence)
+	var continuous: bool = f.fire_now == Formation.Fire.PLATOON or f.fire_now == Formation.Fire.AT_WILL
+	var drill_state := Vector4(f.moving_since, f.fire_now if continuous else 0, f.fire_start, f.fire_end)
 	for node in [e.mmi, e.staff]:
 		node.set_instance_shader_parameter("form_state", form_state)
 		node.set_instance_shader_parameter("form_dims", form_dims)
 		node.set_instance_shader_parameter("anim_state", anim_state)
 		node.set_instance_shader_parameter("drill_state", drill_state)
-	e.mm.visible_instance_count = f.strength
+	e.mm.visible_instance_count = f.layout_strength()
 	var fp: Vector2 = f.footprint()
 	e.ribbon.set_instance_shader_parameter("ribbon_dims", Vector4(fp.x, fp.y, 0.0, 0.0))
 	if f.ftype != e.last_ftype:

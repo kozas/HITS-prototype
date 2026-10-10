@@ -80,6 +80,37 @@ func on_volley(f, t: float, terrain) -> void:
 		spawn(Vector3(p.x, terrain.height(p.x, p.y) + 1.3, p.y), t + rng.randf() * 0.35, rng.randf_range(0.8, 1.25), 0)
 
 
+## Continuous fire: a company's discharge (k >= 0, by platoon) or a second of
+## fire at will (k = -1, scattered along the front). Smoke stays in proportion
+## to rounds fired: over a cycle, as much as one volley makes.
+func on_fire(f, k: int, t: float, terrain) -> void:
+	var fp: Vector2 = f.footprint()
+	var fwd: Vector2 = f.forward()
+	var rt: Vector2 = f.right()
+	var volley_puffs := clampi(int(fp.x / 9.0), 2, 24) if f.ftype == T.LINE else 3
+	var n: int
+	var x0 := -0.5
+	var x1 := 0.5
+	if k >= 0:
+		n = maxi(1, roundi(float(volley_puffs) / f.companies))
+		if f.ftype == T.LINE:
+			x0 = -0.5 + float(k) / f.companies
+			x1 = x0 + 1.0 / f.companies
+	else:
+		n = 1 if rng.randf() < float(volley_puffs) / Formation.AT_WILL_CYCLE - floorf(float(volley_puffs) / Formation.AT_WILL_CYCLE) else 0
+		n += int(float(volley_puffs) / Formation.AT_WILL_CYCLE)
+	var origin: Vector2 = f.pos
+	if f.ftype == T.SQUARE:
+		# Whichever face is firing: pick one.
+		var dir := fwd.rotated(rng.randi_range(0, 3) * PI * 0.5)
+		fwd = dir
+		rt = dir.orthogonal()
+		origin = f.pos + f.back() * fp.y * 0.5 + dir * fp.y * 0.5
+	for j in n:
+		var p: Vector2 = origin + rt * fp.x * rng.randf_range(x0, x1) + fwd * 2.5
+		spawn(Vector3(p.x, terrain.height(p.x, p.y) + 1.3, p.y), t + rng.randf() * (0.35 if k >= 0 else 1.0), rng.randf_range(0.7, 1.1), 0)
+
+
 ## Marching columns kick up dust that can be seen over ridges.
 func update_dust(formations: Array, t: float, terrain) -> void:
 	for f in formations:

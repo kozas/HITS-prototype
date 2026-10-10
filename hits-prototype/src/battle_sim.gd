@@ -11,7 +11,9 @@ const Orientation = preload("res://src/orientation.gd")
 const Order = preload("res://src/order.gd")
 const Objective = preload("res://src/objective.gd")
 const BrigadeBrain = preload("res://src/ai/brigade_brain.gd")
+const BattalionBrain = preload("res://src/ai/battalion_brain.gd")
 const T := Formation.Type
+const F := Formation.Fire
 
 const TICK := 0.1
 const CELL := 300.0
@@ -73,6 +75,8 @@ class Courier:
 	var hazard_t := 1.0  # re-aim and run the gauntlet on the first tick
 
 
+## Moves to the rear shorter than this are made stepping back, front to the enemy.
+const BACKSTEP_DISTANCE := 400.0
 const COURIER_SPEED := 6.5  # m/s, a hard canter over broken ground (~23 km/h)
 const COURIER_HAZARD_RADIUS := 140.0
 const COURIER_HAZARD_PER_SEC := 0.03
@@ -119,9 +123,10 @@ func deploy(bns_per_side: int, men: int, front_z: float) -> void:
 		_organise(army)
 
 
-## Small engagement: one brigade per side in line, `gap` metres apart (front
-## rank to front rank) around `site`. The French brigade is already advancing
-## on the Allied line, which stands and waits. Neither side has an AI general.
+## Small engagement, and the sandbox for orders: one brigade per side in line,
+## `gap` metres apart (front rank to front rank) around `site`, both halted.
+## The French brigade is the player's, with no orders yet. Each Allied
+## battalion has orders to hold its ground. Neither side has an AI general.
 func deploy_contact(site: Vector2, men: int, gap: float) -> void:
 	for army in 2:
 		var yaw := 0.0 if army == 0 else PI
@@ -136,9 +141,10 @@ func deploy_contact(site: Vector2, men: int, gap: float) -> void:
 			_add_battalion(b, men, p, yaw, T.LINE)
 		hq[army] = front + Vector2(0, 600.0 if army == 0 else -600.0)
 		_organise(army)
-	# Advance to 60 m short of the enemy line: close enough to stay in line
-	# (no column for the march) and the halt-and-fire SOP stops them at musket range.
-	_hand_over(make_order(brigades[0], Vector2(site.x, site.y - gap * 0.5 + 60.0), T.LINE, 0.0), 0.0)
+	for f in brigades[1].battalions:
+		var hold := new_order(f, Order.Kind.HOLD, Objective.point(f.pos), brigades[1])
+		hold.facing = f.facing  # as they stand, the line dressed
+		_hand_over(hold, 0.0)
 	ai_enabled = [false, false]
 
 
@@ -289,6 +295,10 @@ func new_order(recipient, kind: int, objective, issuer = null) -> Order:
 	o.kind = kind
 	o.objective = objective
 	o.issued = time
+	# Skipping the recipient's own commander detaches it from him until the
+	# order is done. The general (the player) commands the army.
+	var by = issuer if issuer != null else armies[recipient.army]
+	o.detached = recipient.parent != null and by != null and recipient.parent != by
 	return o
 
 
@@ -389,7 +399,8 @@ func _tick() -> void:
 	_step_couriers(TICK)
 	t = _prof("couriers", t)
 	_apply_hits()
-	t = _prof("hits", t)
+	_step_charges()
+	t = _prof("hits+charges", t)
 	for f: Formation in formations:
 		_move(f, TICK)
 	t = _prof("move", t)
@@ -485,6 +496,7 @@ func _rebuild_grid() -> void:
 		if f.dead:
 			continue
 		f.cpos = f.center()
+		f.axis_r = Vector2(cos(f.facing), -sin(f.facing))
 		var key := Vector2i(floori(f.pos.x / CELL), floori(f.pos.y / CELL))
 		if _grid.has(key):
 			_grid[key].append(f)
@@ -492,29 +504,57 @@ func _rebuild_grid() -> void:
 			_grid[key] = [f]
 
 
-func neighbours(p: Vector2) -> Array:
+## Formations in the grid cells around `p`: the 3x3 block by default (reliable
+## to about one cell, 300 m), more rings for longer looks.
+func neighbours(p: Vector2, rings := 1) -> Array:
 	var out := []
 	var cx := floori(p.x / CELL)
 	var cz := floori(p.y / CELL)
-	for dx in range(-1, 2):
-		for dz in range(-1, 2):
+	for dx in range(-rings, rings + 1):
+		for dz in range(-rings, rings + 1):
 			var cell = _grid.get(Vector2i(cx + dx, cz + dz))
 			if cell != null:
 				out.append_array(cell)
 	return out
 
 
-func nearest_enemy(p: Vector2, army: int, radius: float):
-	var best = null
-	var bd := radius * radius
-	for e: Formation in neighbours(p):
-		if e.army == army:
-			continue
-		var d2: float = e.cpos.distance_squared_to(p)
-		if d2 < bd:
-			bd = d2
-			best = e
-	return best
+## Nearest enemy within `radius` of `p`; `formed`: ignore skirmishers.
+func nearest_enemy(p: Vector2, army: int, radius: float, formed := false):
+	scan_enemies(p, army, radius)
+	return scan_formed if formed else scan_any
+
+
+## Results of the last scan_enemies(): nearest formed enemy, nearest of any kind.
+var scan_formed = null
+var scan_any = null
+
+
+## One pass over the grid cells round `p` (no arrays built): sets scan_formed
+## and scan_any to the nearest enemy battalion in formation, and the nearest
+## enemy of any kind (skirmishers included), within `radius`.
+func scan_enemies(p: Vector2, army: int, radius: float) -> void:
+	scan_formed = null
+	scan_any = null
+	var bf := radius * radius
+	var ba := bf
+	var rings := 1 if radius <= 360.0 else ceili(radius / CELL)
+	var cx := floori(p.x / CELL)
+	var cz := floori(p.y / CELL)
+	for dx in range(-rings, rings + 1):
+		for dz in range(-rings, rings + 1):
+			var cell = _grid.get(Vector2i(cx + dx, cz + dz))
+			if cell == null:
+				continue
+			for e: Formation in cell:
+				if e.army == army or e.dead:
+					continue
+				var d2: float = e.cpos.distance_squared_to(p)
+				if d2 < ba:
+					ba = d2
+					scan_any = e
+				if d2 < bf and e.ftype != T.OPEN:
+					bf = d2
+					scan_formed = e
 
 
 ## Orders whose staff work is done are acted on, oldest first.
@@ -538,6 +578,8 @@ func _execute(cmd, o: Order) -> void:
 	match cmd.level:
 		Command.Level.BRIGADE:
 			ok = BrigadeBrain.execute(self, cmd, o)
+		Command.Level.BATTALION:
+			ok = BattalionBrain.execute(self, cmd, o)
 		_:
 			push_warning("No brain yet for %s (level %d): order %d ignored" % [cmd.title, cmd.level, o.id])
 	if not ok:
@@ -603,7 +645,7 @@ func _move(f: Formation, dt: float) -> void:
 		f.ftype_from = f.ftype
 		f.render_dirty = true
 	# Fast path: most battalions are standing still at any moment.
-	if not f.has_target and not f.routing and f.rout_amount == 0.0:
+	if not f.has_target and not f.routing:
 		if was_moving:
 			f.moving = false
 			f.moving_since = time
@@ -611,34 +653,36 @@ func _move(f: Formation, dt: float) -> void:
 		return
 	f.moving = false
 
-	var target_rout := 1.0 if f.routing else 0.0
-	if f.rout_amount != target_rout:
-		f.rout_amount = move_toward(f.rout_amount, target_rout, dt / (8.0 if f.routing else 15.0))
-		f.render_dirty = true
-
 	if f.routing:
-		f.pos += f.back() * f.speed() * dt
-		f.moving = true
-	elif f.is_transitioning(time):
+		# Back towards the rally point, the men facing about (drawn by the shader).
+		var to_rally: Vector2 = f.rally_point - f.pos
+		var dr := to_rally.length()
+		if dr > 3.0:
+			f.pos += to_rally / dr * minf(f.speed() * dt, dr)
+			f.moving = true
+	elif f.is_transitioning(time) or time < f.obey_at:
 		pass
 	elif f.has_target:
 		var to: Vector2 = f.target_pos - f.pos
 		var dist := to.length()
 		var maxturn: float = f.turn_rate() * dt
 		if dist > 3.0:
-			var threat: Vector2 = f.threat_dir
 			if f.ftype != f.march_ftype and dist > 20.0:
 				f.begin_transition(f.march_ftype, time)
-			elif f.engaged and to.dot(threat) > 0.0:
-				pass # under fire: halt and return fire rather than press on
+			elif f.halted or f.pace_mul <= 0.0:
+				pass # halted to give fire, or waiting for the line to come up
 			else:
-				var sidestep: bool = f.ftype == T.LINE and dist < 60.0
+				# Close to its place a line sidesteps rather than wheels; a battalion
+				# falling back, or going a short way to the rear, steps back still
+				# facing the enemy instead of wheeling about.
+				var sidestep: bool = (f.ftype == T.LINE and dist < 60.0) or f.retiring \
+					or (dist < BACKSTEP_DISTANCE and f.ftype != T.MARCH and to.dot(f.forward()) < -0.5 * dist)
 				var want: float = f.target_facing if sidestep else atan2(-to.x, -to.y)
 				var diff := angle_difference(f.facing, want)
 				f.facing += clampf(diff, -maxturn, maxturn)
 				f.moving = true
 				if absf(diff) < 0.5 or sidestep:
-					f.pos += to / dist * minf(f.speed() * f.slope_factor * dt, dist)
+					f.pos += to / dist * minf(f.speed() * f.slope_factor * f.pace_mul * dt, dist)
 		elif f.ftype != f.target_ftype:
 			f.begin_transition(f.target_ftype, time)
 		else:
@@ -648,6 +692,7 @@ func _move(f: Formation, dt: float) -> void:
 				f.moving = true
 			else:
 				f.has_target = false
+				f.retiring = false
 
 	f.pos = f.pos.clamp(Vector2(-MAP_LIMIT, -MAP_LIMIT), Vector2(MAP_LIMIT, MAP_LIMIT))
 	if f.moving != was_moving:
@@ -660,10 +705,12 @@ func _move(f: Formation, dt: float) -> void:
 func _separate(slot: int) -> void:
 	for i in range(slot, formations.size(), 10):
 		var f: Formation = formations[i]
-		if f.dead:
-			continue
+		if f.dead or f.ftype == T.OPEN:
+			continue  # skirmishers go where they please
 		var c: Vector2 = f.cpos
-		var rf: float = f.fp.x * 0.5 + 5.0
+		var fr: Vector2 = f.axis_r
+		var ff := Vector2(-fr.y, fr.x)  # perpendicular: the front-to-back axis
+		var rf: float = f.fp_radius
 		var cx := floori(f.pos.x / CELL)
 		var cz := floori(f.pos.y / CELL)
 		for dx in range(-1, 2):
@@ -672,76 +719,97 @@ func _separate(slot: int) -> void:
 				if cell == null:
 					continue
 				for e: Formation in cell:
-					if e.id <= f.id:
-						continue
+					if e.id <= f.id or e.ftype == T.OPEN or (e.army != f.army and (f.charge != null or e.charge != null)):
+						continue  # a charge is meant to close
 					var ce: Vector2 = e.cpos
 					var d := c.distance_to(ce)
-					var min_d := (rf + e.fp.x * 0.5 + 5.0) * 0.7
-					if d < min_d and d > 0.01:
-						var push := (c - ce) / d * (min_d - d) * 0.3
+					if d > (rf + e.fp_radius) * 0.85 or d < 0.01:
+						continue
+					# Each footprint's half-extent towards the other (an oriented box,
+					# so lines side by side keep their interval and opposing lines can
+					# close front to front).
+					var u := (c - ce) / d
+					var er: Vector2 = e.axis_r
+					var ef := Vector2(-er.y, er.x)
+					var ext_f := absf(u.dot(fr)) * f.fp.x * 0.5 + absf(u.dot(ff)) * f.fp.y * 0.5
+					var ext_e := absf(u.dot(er)) * e.fp.x * 0.5 + absf(u.dot(ef)) * e.fp.y * 0.5
+					var min_d := (ext_f + ext_e) * 0.85
+					if d < min_d:
+						var push := u * (min_d - d) * 0.3
 						f.pos += push
 						e.pos -= push
 
 
+## Standing orders, musketry and morale: each battalion's brain, once a second.
 func _combat(slot: int, dt: float) -> void:
 	for i in range(slot, formations.size(), 10):
 		var f: Formation = formations[i]
-		if f.dead:
-			continue
-		f.engaged = false
-		var c: Vector2 = f.cpos
-		var e: Formation = nearest_enemy(c, f.army, 360.0)
-		if f.routing:
-			if f.broken:
-				if time > f.broken_at + 90.0:
-					f.dead = true
-					f.render_dirty = true
-				continue
-			if e == null:
-				f.morale += 0.02 * dt
-			if f.morale > 0.55:
-				f.routing = false
-				f.has_target = false
-				f.begin_transition(T.LINE, time)
-			continue
-		if e == null:
-			f.morale = minf(1.0, f.morale + 0.004 * dt)
-			continue
-		var to: Vector2 = e.cpos - c
-		var d := to.length()
-		if d > FIRE_RANGE:
-			f.morale = minf(1.0, f.morale + 0.002 * dt)
-			continue
-		f.engaged = true
-		f.threat_dir = to / maxf(d, 0.1)
-		var trans: bool = f.is_transitioning(time)
-		if f.ftype == T.MARCH and not trans:
-			f.begin_transition(T.LINE, time)
-			continue
-		var can_bear: bool = f.ftype == T.SQUARE or absf(f.forward().angle_to(to)) < deg_to_rad(65.0)
-		if not can_bear and not trans and not f.has_target:
-			f.target_pos = f.pos
-			f.target_facing = atan2(-to.x, -to.y)
-			f.target_ftype = f.ftype
-			f.march_ftype = f.ftype
-			f.has_target = true
-		if can_bear and not trans and not f.moving and time >= f.next_fire:
-			_volley(f, e, d)
+		if not f.dead:
+			BattalionBrain.think(self, f, dt)
 
 
-func _volley(f: Formation, e: Formation, d: float) -> void:
+## Chance that one musket fired at `d` metres hits, before the manner of fire.
+func hit_chance(f: Formation, e: Formation, d: float) -> float:
 	var p: float = 0.2 * exp(-d / 70.0) * (0.6 + 0.4 * f.morale)
-	var cas := int(round(f.firing_muskets() * p * rng.randf_range(0.6, 1.4)))
 	if e.ftype == T.COLUMN or e.ftype == T.SQUARE:
-		cas = int(cas * 1.3)
+		p *= 1.3  # deep targets: every ball finds someone
+	elif e.ftype == T.OPEN:
+		p *= 0.3  # men a few paces apart, in what cover they find
+	return p
+
+
+## The whole battalion fires at the word of command.
+func volley(f: Formation, e: Formation, d: float) -> void:
+	var cas := int(round(f.firing_muskets() * hit_chance(f, e, d) * rng.randf_range(0.6, 1.4)))
 	f.last_volley = time + 1.6
+	f.last_shot = f.last_volley
 	f.next_fire = time + rng.randf_range(18.0, 26.0)
 	f.render_dirty = true
 	events.append({"type": "volley", "f": f, "t": f.last_volley})
 	if cas > 0:
-		_hits.append([f.last_volley + 0.2, e, cas])
+		_hits.append([f.last_volley + 0.2, e, cas, BattalionBrain.SHOCK[F.VOLLEY], 1.0])
 
 
+## Continuous fire between t0 and t1. By platoon: companies fire in turn,
+## rolling from the right, one every PLATOON_CYCLE / companies seconds; the
+## shader draws the same schedule from fire_start. At will: each man on his own
+## cycle, so the battalion's fire is a steady patter.
+func continuous_fire(f: Formation, e: Formation, d: float, t0: float, t1: float) -> void:
+	var p: float = hit_chance(f, e, d) * BattalionBrain.ACCURACY[f.fire_now]
+	var shock: float = BattalionBrain.SHOCK[f.fire_now]
+	var c: int = f.companies
+	if f.fire_now == F.PLATOON:
+		var step := Formation.PLATOON_CYCLE / c
+		var n := maxi(ceili((t0 - f.fire_start) / step), 0)
+		while f.fire_start + n * step < t1:
+			var ts := f.fire_start + n * step
+			var k := c - 1 - n % c
+			n += 1
+			if f.company_absent(k):
+				continue
+			f.cas_accum += float(f.firing_muskets()) / c * p * rng.randf_range(0.6, 1.4)
+			_owe_hits(f, e, ts + 0.2, shock, 1.0 / c)
+			events.append({"type": "fire", "f": f, "k": k, "t": ts})
+			f.last_shot = ts
+	elif f.fire_now == F.AT_WILL and t1 > f.fire_start:
+		var span := minf(t1 - maxf(t0, f.fire_start), t1 - t0)
+		var share := span / Formation.AT_WILL_CYCLE
+		f.cas_accum += f.firing_muskets() * share * p * rng.randf_range(0.6, 1.4)
+		_owe_hits(f, e, t1, shock, share)
+		events.append({"type": "fire", "f": f, "k": -1, "t": t0})
+		f.last_shot = t1
+
+
+## Pays the whole casualties out of the fractional account, so small companies
+## and single seconds of fire still add up exactly.
+func _owe_hits(f: Formation, e: Formation, at: float, shock: float, share: float) -> void:
+	var cas := int(f.cas_accum)
+	f.cas_accum -= cas
+	if cas > 0 or share > 0.0:
+		_hits.append([at, e, cas, shock, share])
+
+
+## Hits land: [time, target, casualties, shock, share of a full volley].
 func _apply_hits() -> void:
 	if _hits.is_empty():
 		return
@@ -754,30 +822,311 @@ func _apply_hits() -> void:
 		if e.dead:
 			continue
 		var cas: int = mini(h[2], e.strength)
-		e.strength -= cas
-		e.refresh_shape()
-		e.morale -= float(cas) / e.max_strength * 5.0 + 0.015
-		e.render_dirty = true
-		events.append({"type": "casualties", "f": e, "n": cas})
+		var shock: float = h[3]
+		if e.activity == Formation.Activity.CHARGING:
+			shock *= CHARGE_ELAN  # going in with the bayonet, men press on through it
+		if cas > 0:
+			e.strength -= cas
+			e.refresh_shape()
+			e.render_dirty = true
+			events.append({"type": "casualties", "f": e, "n": cas})
+		# Losses shake men; so does the noise of fire coming their way.
+		e.morale -= (float(cas) / e.max_strength * 5.0 + 0.015 * h[4]) * shock
 		if e.strength < e.max_strength * 0.15 and not e.broken:
-			e.broken = true
 			e.broken_at = time
-			_start_rout(e)
+			_start_rout(e, true)
 		elif e.morale < 0.25 and not e.routing:
 			_start_rout(e)
 	_hits = keep
 
 
-func _start_rout(f: Formation) -> void:
-	f.routing = true
+func _start_rout(f: Formation, broken := false) -> void:
+	f.set_morale_state(Formation.Morale.BROKEN if broken else Formation.Morale.ROUTING, time)
 	f.has_target = false
-	f.render_dirty = true
+	f.halted = false
+	f.retiring = false
+	f.activity = Formation.Activity.IDLE
+	BattalionBrain.cease_fire(self, f)
+	if f.charge != null:
+		events.append({"type": "charge_result", "f": f, "target": f.charge.defender, "result": "faltered"})
+		_end_charge(f.charge)
+	if f.order != null and f.order.status == Order.Status.EXECUTING and f.order.kind == Order.Kind.ATTACK:
+		_set_status(f.order, Order.Status.FAILED)
+	f.routed_at = time
+	# Run from the danger, to re-form some way back; a battalion that has run
+	# once is never quite as steady again.
+	var away: Vector2 = -f.threat_dir if f.threat_dir != Vector2.ZERO else f.back()
+	f.rally_point = (f.pos + away * BattalionBrain.RALLY_DISTANCE).clamp(Vector2(-MAP_LIMIT, -MAP_LIMIT), Vector2(MAP_LIMIT, MAP_LIMIT))
+	f.morale_cap = maxf(0.4, minf(f.morale_cap, 0.75) - 0.15)
 	events.append({"type": "rout", "f": f})
-	# Panic is contagious.
+	# Panic is contagious (between formed battalions: skirmishers are expected
+	# to fall back, and are not watched for it).
+	if f.is_skirmisher:
+		return
 	for n in neighbours(f.cpos):
-		if n.army == f.army and n != f and n.cpos.distance_to(f.cpos) < 300.0:
+		if n.army == f.army and n != f and not n.is_skirmisher and n.cpos.distance_to(f.cpos) < 300.0:
 			n.morale -= 0.08
 
+
+## Throws out (or calls in) the battalion's light company as a skirmish screen.
+## Out: the company (company 0, the left flank) leaves as a Formation of its
+## own in open order and runs out ahead; the battalion keeps its place in the
+## ranks. In: it runs back and is absorbed, with whoever is left of it.
+func set_skirmishers(f: Formation, out: bool) -> void:
+	if not out:
+		if f.skirmishers != null:
+			f.skirmishers.recalled = true
+		return
+	if f.skirmishers != null or f.is_skirmisher or f.dead or f.routing or f.ftype == T.SQUARE or f.ftype == T.MARCH:
+		return
+	var men := mini(ceili(float(f.layout_strength()) / f.companies), f.strength - 100)
+	if men < 20:
+		return
+	var s := Formation.new()
+	s.id = formations.size()
+	s.army = f.army
+	s.brigade = f.brigade
+	f.add(s)
+	s.is_skirmisher = true
+	s.title = ("Voltigeurs, " if f.army == 0 else "Light company, ") + f.title
+	s.label = ("volt. " if f.army == 0 else "lt coy ") + f.label
+	s.commander = names.commander(f.army, Command.Level.BATTALION)
+	s.ranks = 2
+	s.companies = 2
+	s.max_strength = men
+	s.strength = men
+	s.morale = f.morale
+	s.morale_cap = f.morale_cap
+	s.facing = f.facing
+	s.prev_facing = f.facing
+	# From the place of the light company, on the left of the line.
+	var company_w: float = (f.fp.x - Formation.GUARD_W) / f.companies if f.ftype == T.LINE else 0.0
+	s.pos = f.pos + f.right() * (-0.5 * f.fp.x + 0.5 * company_w)
+	s.prev_pos = s.pos
+	s.ftype_from = T.LINE
+	s.ftype = T.OPEN
+	s.trans_start = time
+	s.trans_dur = Formation.OPEN_FORM_T
+	s.fire_auto = false
+	s.fire_mode = F.AT_WILL
+	s.activity = Formation.Activity.SKIRMISHING
+	s.refresh_shape()
+	s.cpos = s.center()
+	BattalionBrain.march_to(self, s, f.pos + f.forward() * BattalionBrain.SCREEN_DEPTH, f.facing, T.OPEN)
+	f.strength -= men
+	f.held_out = men
+	f.absent_mask |= 1
+	f.skirmishers = s
+	f.refresh_shape()
+	f.render_dirty = true
+	formations.append(s)
+	events.append({"type": "formation_spawned", "f": s})
+	events.append({"type": "skirmishers", "f": f, "out": true})
+
+
+## The skirmishers are back: their survivors take their places in the ranks.
+func absorb_skirmishers(f: Formation) -> void:
+	var s: Formation = f.skirmishers
+	f.strength += s.strength
+	_skirmishers_gone(f)
+	s.absorbed = true
+	s.dead = true
+	s.render_dirty = true
+	f.subordinates.erase(s)
+	events.append({"type": "skirmishers", "f": f, "out": false})
+
+
+## The battalion closes its ranks over the company's places (back, or lost).
+func _skirmishers_gone(f: Formation) -> void:
+	f.held_out = 0
+	f.absent_mask &= ~1
+	f.skirmishers = null
+	f.skirmish_next = time + 120.0
+	f.refresh_shape()
+	f.render_dirty = true
+
+
+# ---------------------------------------------------------------- charges
+
+## A bayonet charge: approach at the pas de charge; at 50 m the defender either
+## breaks or stands and gives a closing volley; the attacker then either recoils
+## or goes in, and a short melee decides it. Most charges were decided before
+## the bayonets crossed, and so are these.
+class Charge:
+	enum Phase { APPROACH, VOLLEY, MELEE }
+	var attacker
+	var defender
+	var phase: int = Phase.APPROACH
+	var t := 0.0      # phase began
+	var until := 0.0  # phase ends
+	var start_a := 0  # strengths when the melee began
+	var start_d := 0
+
+
+const CHARGE_TEST_GAP := 50.0
+## Fire shakes a battalion charging home this much less than one standing.
+const CHARGE_ELAN := 0.5
+## Share of the defender's muskets loaded for a closing volley, by its fire:
+## a battalion firing by volleys is loaded between them; firing by platoons,
+## some companies always are (the point of it); firing at will, only some men.
+const CLOSING_VOLLEY := [1.0, 0.5, 0.3, 1.0]
+## How steady each formation is against a charge (line, column, square, march).
+const CHARGE_STEADINESS := [0.05, 0.1, 0.35, -0.3]
+var charges: Array = []
+
+
+func start_charge(a: Formation, d: Formation) -> void:
+	var c := Charge.new()
+	c.attacker = a
+	c.defender = d
+	c.t = time
+	a.charge = c
+	a.activity = Formation.Activity.CHARGING
+	a.target_enemy = d
+	a.halted = false
+	a.retiring = false
+	a.march_ftype = a.ftype
+	a.target_ftype = a.ftype
+	charges.append(c)
+	events.append({"type": "charge", "f": a, "target": d})
+
+
+func _step_charges() -> void:
+	if charges.is_empty():
+		return
+	for c: Charge in charges.duplicate():
+		var a: Formation = c.attacker
+		var d: Formation = c.defender
+		if a.dead or a.routing:
+			_end_charge(c)
+			continue
+		if d.dead or d.routing:
+			_charge_won(c)
+			continue
+		var to: Vector2 = d.cpos - a.pos
+		var gap := to.length() - d.fp.y * 0.5
+		match c.phase:
+			Charge.Phase.APPROACH:
+				a.target_pos = d.cpos - to.normalized() * (d.fp.y * 0.5 + 2.0)
+				a.target_facing = Orientation.yaw_of(to)
+				a.has_target = true
+				if gap <= CHARGE_TEST_GAP:
+					_defender_test(c)
+				elif time - c.t > 240.0:
+					_end_charge(c)  # never got there
+			Charge.Phase.VOLLEY:
+				if time >= c.until:
+					_attacker_test(c)
+			Charge.Phase.MELEE:
+				a.has_target = false
+				if tick_count % 10 == 0:
+					# Bayonet and butt: losses on both sides, every second.
+					_melee_losses(a, d)
+					_melee_losses(d, a)
+				if time >= c.until:
+					_melee_decides(c)
+
+
+## The defender sees the charge come on. Does he stand?
+func _defender_test(c: Charge) -> void:
+	var a: Formation = c.attacker
+	var d: Formation = c.defender
+	var steady: float = d.morale + CHARGE_STEADINESS[d.ftype] + rng.randf_range(-0.25, 0.25)
+	var loaded: float = CLOSING_VOLLEY[d.fire_now] if d.firing or d.fire_now != F.VOLLEY else (1.0 if time - d.last_shot > 12.0 else 0.0)
+	steady += 0.1 * loaded
+	var from: Vector2 = (a.cpos - d.cpos).normalized()
+	if d.ftype != T.SQUARE and absf(d.forward().angle_to(from)) > deg_to_rad(65.0):
+		steady -= 0.3  # taken in flank
+	var shock: float = 0.45 + 0.25 * a.morale + (0.08 if a.ftype == T.COLUMN else 0.0)
+	shock += clampf((float(a.strength) / maxf(d.strength, 1.0) - 1.0) * 0.15, -0.1, 0.15)
+	if steady < shock:
+		d.threat_dir = from
+		_start_rout(d)
+		events.append({"type": "charge_result", "f": a, "target": d, "result": "broke"})
+		return
+	c.phase = Charge.Phase.VOLLEY
+	c.t = time
+	c.until = time + 1.5
+	if loaded > 0.0 and d.ftype != T.MARCH:
+		# The closing volley, at thirty paces.
+		var cas := int(round(d.firing_muskets() * loaded * 1.5 * hit_chance(d, a, CHARGE_TEST_GAP * 0.5) * rng.randf_range(0.6, 1.4)))
+		d.last_volley = time + 0.3
+		d.last_shot = d.last_volley
+		d.next_fire = time + 20.0
+		d.render_dirty = true
+		events.append({"type": "volley", "f": d, "t": d.last_volley})
+		_hits.append([d.last_volley + 0.2, a, cas, 1.0, 1.0])
+
+
+## Through the smoke: does the attacker go on?
+func _attacker_test(c: Charge) -> void:
+	var a: Formation = c.attacker
+	var d: Formation = c.defender
+	var push: float = a.morale + rng.randf_range(-0.25, 0.25) + (0.15 if a.charge_below > 1.0 else 0.0) + 0.1 * a.aggression
+	if push < 0.55:
+		# Recoils: falls back in disorder, shaken.
+		_end_charge(c)
+		a.morale -= 0.1
+		a.set_morale_state(Formation.Morale.SHAKEN, time)
+		a.threat_dir = (d.cpos - a.cpos).normalized()
+		a.target_pos = a.pos - a.threat_dir * BattalionBrain.FALLBACK_DISTANCE
+		a.target_facing = a.facing
+		a.has_target = true
+		a.retiring = true
+		events.append({"type": "charge_result", "f": a, "target": d, "result": "recoiled"})
+		return
+	c.phase = Charge.Phase.MELEE
+	c.t = time
+	c.until = time + rng.randf_range(10.0, 30.0)
+	c.start_a = a.strength
+	c.start_d = d.strength
+
+
+func _melee_losses(f: Formation, by: Formation) -> void:
+	var cas := mini(int(round(by.strength * 0.006 * rng.randf_range(0.5, 1.5))), f.strength)
+	if cas > 0:
+		f.strength -= cas
+		f.refresh_shape()
+		f.render_dirty = true
+		f.morale -= float(cas) / f.max_strength * 3.0
+		events.append({"type": "casualties", "f": f, "n": cas})
+
+
+## The side whose spirit has held up better against its losses stays.
+func _melee_decides(c: Charge) -> void:
+	var a: Formation = c.attacker
+	var d: Formation = c.defender
+	var sa: float = a.morale * a.strength / maxf(c.start_a, 1.0) + rng.randf_range(-0.1, 0.1)
+	var sd: float = d.morale * d.strength / maxf(c.start_d, 1.0) + CHARGE_STEADINESS[d.ftype] * 0.5 + rng.randf_range(-0.1, 0.1)
+	if sa > sd:
+		d.threat_dir = (a.cpos - d.cpos).normalized()
+		_start_rout(d)
+		events.append({"type": "charge_result", "f": a, "target": d, "result": "won"})
+		_charge_won(c)
+	else:
+		a.threat_dir = (d.cpos - a.cpos).normalized()
+		events.append({"type": "charge_result", "f": a, "target": d, "result": "repulsed"})
+		_start_rout(a)
+
+
+## The defender has gone: carry on 30 m into his ground and halt there,
+## disordered by the rush.
+func _charge_won(c: Charge) -> void:
+	var a: Formation = c.attacker
+	_end_charge(c)
+	a.target_pos = a.pos + a.forward() * 30.0
+	a.target_facing = a.facing
+	a.has_target = true
+	a.next_fire = time + 20.0
+
+
+func _end_charge(c: Charge) -> void:
+	charges.erase(c)
+	var a: Formation = c.attacker
+	if a.charge == c:
+		a.charge = null
+		a.activity = Formation.Activity.IDLE
+		a.has_target = false
 
 # ---------------------------------------------------------------- AI
 

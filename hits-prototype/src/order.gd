@@ -5,16 +5,18 @@ extends RefCounted
 ## takes included. The recipient may be any Command, from a corps to a battalion.
 ##
 ## Lifecycle: WRITTEN -> RIDING (courier) -> PREPARING (staff work) -> EXECUTING
-## -> COMPLETE | SUPERSEDED, or LOST with its courier. Only the sim changes it.
+## -> COMPLETE | SUPERSEDED | FAILED (the attack broke), or LOST with its courier.
+## Only the sim changes it.
 
 const Objective = preload("res://src/objective.gd")
 
-enum Kind { MOVE, ATTACK, HOLD }
+## REJOIN: a detached unit goes back under its own commander.
+enum Kind { MOVE, ATTACK, HOLD, REJOIN }
 enum Intensity { PROBE, PRESS, ALL_OUT }
-enum Status { WRITTEN, RIDING, PREPARING, EXECUTING, COMPLETE, SUPERSEDED, LOST }
-const KIND_NAMES := ["Move", "Attack", "Hold"]
+enum Status { WRITTEN, RIDING, PREPARING, EXECUTING, COMPLETE, SUPERSEDED, LOST, FAILED }
+const KIND_NAMES := ["Move", "Attack", "Hold", "Rejoin"]
 const INTENSITY_NAMES := ["Probe", "Press", "All-out"]
-const STATUS_NAMES := ["written", "riding", "preparing", "executing", "complete", "superseded", "lost"]
+const STATUS_NAMES := ["written", "riding", "preparing", "executing", "complete", "superseded", "lost", "failed"]
 const AUTO := -1
 
 var id := 0

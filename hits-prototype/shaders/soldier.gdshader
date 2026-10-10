@@ -24,14 +24,17 @@ uniform float sim_time = 0.0;
 // colour guard (INSTANCE_ID = staff slot, see staff_pos()).
 uniform bool staff = false;
 
-// x = formation from, y = formation to, z = time the order was given (sim s), w = unused
+// x = formation from, y = formation to, z = time the order was given (sim s),
+// w = companies away (bit k: company k detached as skirmishers, not drawn here)
 instance uniform vec4 form_state = vec4(1.0, 1.0, -1000.0, 0.0);
 // x = strength, y = ranks, z = seed, w = companies
 instance uniform vec4 form_dims = vec4(600.0, 3.0, 0.0, 6.0);
-// x = moving 0/1, y = last volley time, z = rout amount 0..1, w = cadence multiplier
+// x = moving 0/1, y = last volley time, w = cadence multiplier,
+// z = rout clock: 0 steady, routing since z - 1 if z > 0, rallying since -z - 1 if z < 0
 instance uniform vec4 anim_state = vec4(0.0, -1000.0, 0.0, 1.0);
-// x = time the battalion last started or stopped marching
-instance uniform vec4 drill_state = vec4(-1000.0, 0.0, 0.0, 0.0);
+// x = time the battalion last started or stopped marching,
+// y = fire (0 volley, 1 by platoon, 2 at will), z = continuous fire began, w = ended
+instance uniform vec4 drill_state = vec4(-1000.0, 0.0, -1000.0, -1000.0);
 instance uniform vec4 coat_color = vec4(0.02, 0.03, 0.15, 1.0);
 instance uniform vec4 trim_color = vec4(0.7, 0.7, 0.65, 1.0);
 instance uniform vec4 trouser_color = vec4(0.7, 0.7, 0.65, 1.0);
@@ -40,6 +43,7 @@ const int LINE = 0;
 const int COLUMN = 1;
 const int SQUARE = 2;
 const int MARCH = 3;
+const int OPEN = 4;  // skirmish order: a light company out on its own
 
 const float FILE_W = 0.6;    // elbow to elbow
 const float RANK_D = 0.65;   // 0.325 m between ranks, plus the man
@@ -48,6 +52,16 @@ const float GUARD_W = 1.2;   // colour guard: 2 files in the centre of the batta
 const float QUICK = 1.08;    // pas accéléré: 100 paces/min of 0.65 m
 const float FACE_T = 0.8;    // time to face left, right or about
 const vec3 MUZZLE = vec3(0.27, 2.2, -0.02);
+// Mirrors of Formation.ROUT_SCATTER_T, RALLY_REFORM_T, PLATOON_CYCLE, AT_WILL_CYCLE.
+const float ROUT_T = 8.0;
+const float RALLY_T = 15.0;
+const float PLATOON_CYCLE = 20.0;
+const float AT_WILL_CYCLE = 16.0;
+// Open order (mirrors Formation.SKIRMISH_GAP, SUPPORT_DIST, OPEN_FORM_T): pairs
+// this far apart, a quarter of the company in support this far behind.
+const float SKIRMISH_GAP = 4.0;
+const float SUPPORT_DIST = 40.0;
+const float OPEN_FORM_T = 12.0;
 
 // Mesh parts (UV.y), see meshes.gd
 const int P_LEG_L = 1;
@@ -70,6 +84,7 @@ varying vec3 v_color;
 varying float v_part;
 
 struct Bn {
+	int n;       // men laid out
 	int r;       // ranks
 	int c;       // companies
 	int pc;      // men per company
@@ -113,6 +128,7 @@ float mix_angle(float a, float b, float t) {
 
 Bn bn_make(int n, int r, int c) {
 	Bn b;
+	b.n = n;
 	b.r = max(r, 1);
 	b.c = max(c, 2);
 	b.pc = max((n + b.c - 1) / b.c, 1);
@@ -135,8 +151,30 @@ vec2 bn_size(Bn b, int type) {
 		return vec2(2.0 * b.wc + GUARD_W, float(b.c / 2 - 1) * b.step + b.ddiv);
 	} else if (type == SQUARE) {
 		return vec2(2.0 * b.wc, 2.0 * float(b.r) * RANK_D + float(max(b.c / 2 - 2, 0)) * b.wc);
+	} else if (type == OPEN) {
+		int pairs = (b.n - b.n / 4 + 1) / 2;
+		return vec2(max(float(pairs) * SKIRMISH_GAP, 4.0), SUPPORT_DIST + 2.0 * RANK_D);
 	}
 	return vec2(b.wr, float(2 * b.c - 1) * b.step_s + b.ddiv);
+}
+
+// Man i in open order: (x, z, yaw, rank). The chain is pairs of men a few paces
+// apart, each pair loosely placed (they take cover where they find it); the
+// last quarter of the company stands in support, in two ranks, behind.
+vec4 open_pos(Bn b, int i, float ha, float hb) {
+	int support = b.n / 4;
+	int chain = b.n - support;
+	if (i < chain) {
+		int pairs = (chain + 1) / 2;
+		int q = i / 2;
+		float partner = float(i % 2);
+		float x = (float(q) - 0.5 * float(pairs - 1)) * SKIRMISH_GAP + (ha - 0.5) * 2.4 + partner * 0.9;
+		float z = (hb - 0.5) * 3.0 + partner * 0.5;
+		return vec4(x, z, (ha - 0.5) * 0.7, 0.0);
+	}
+	int j = i - chain;
+	int files = max((support + 1) / 2, 1);
+	return vec4((float(j / 2) - 0.5 * float(files - 1)) * FILE_W, SUPPORT_DIST + float(j % 2) * RANK_D, 0.0, 2.0);
 }
 
 // Company k: front-centre (x, z) and facing, for line, column and square.
@@ -199,6 +237,15 @@ vec3 staff_pos(Bn b, int type, int i, float adv) {
 	vec2 sz = bn_size(b, type);
 	float w = sz.x;
 	float d = sz.y;
+	if (type == OPEN) {
+		// Officers and sergeants along the chain, the bugler with the support.
+		int k = i / 5;
+		int r = i % 5;
+		float x = (float(k) - 0.5 * float(b.c - 1)) * 0.5 * w;
+		vec2 at = r == 0 ? vec2(x, 6.0) : (r == 4 ? vec2(x + 2.0, SUPPORT_DIST + 2.0)
+			: (r == 2 ? vec2(x, SUPPORT_DIST - 2.5) : vec2(x + (r == 1 ? -0.2 : 0.2) * w, 3.0)));
+		return vec3(at, 0.0);
+	}
 	float back = float(b.r - 1) * RANK_D + SERRE;
 	if (i < 5 * b.c) {
 		int k = i / 5;
@@ -304,21 +351,36 @@ void vertex() {
 	float rank = 0.0;
 	int mask = -1;
 	int role = -1;
+	int k = -1;
 	if (!staff) {
-		int k = i / b.pc;
+		k = i / b.pc;
 		int j = i % b.pc;
 		int f = j / b.r;
 		int s = f < b.hl ? 0 : 1;
 		int cnt = s == 0 ? b.hl : b.nf - b.hl;
 		rank = float(j % b.r);
 		vec2 local = vec2((float(f - s * b.hl) + 0.5 - 0.5 * float(cnt)) * FILE_W, rank * RANK_D);
-		vec3 sb = section_frame(b, fb, k, s);
-		if (fa == fb) {
-			// Settled (the common case): one formation, no drill.
-			pose = vec4(in_frame(sb, local), 0.0);
+		if (fb == OPEN) {
+			// Skirmishers: each man runs out to his place in the chain.
+			vec4 op = open_pos(b, i, h1, h4);
+			rank = op.w;
+			if (fa == OPEN) {
+				pose = vec4(op.xy, op.z, 0.0);
+			} else {
+				vec3 cp = in_frame(section_frame(b, fa, k, s), local);
+				float t = sim_time - form_state.z - h2 * 1.5;
+				float kk = smoothstep(0.0, OPEN_FORM_T - 1.5, t);
+				pose = vec4(mix(cp.xy, op.xy, kk), mix(cp.z, op.z, kk), (t > 0.0 && kk < 1.0) ? 1.0 : 0.0);
+			}
 		} else {
-			float t0 = form_state.z + 1.0 + hash_f(uint(form_dims.z) * 31u + uint(k) * 977u) * 0.8;
-			pose = drill(section_frame(b, fa, k, s), sb, local, t0, float(cnt) * FILE_W);
+			vec3 sb = section_frame(b, fb, k, s);
+			if (fa == fb) {
+				// Settled (the common case): one formation, no drill.
+				pose = vec4(in_frame(sb, local), 0.0);
+			} else {
+				float t0 = form_state.z + 1.0 + hash_f(uint(form_dims.z) * 31u + uint(k) * 977u) * 0.8;
+				pose = drill(section_frame(b, fa, k, s), sb, local, t0, float(cnt) * FILE_W);
+			}
 		}
 	} else {
 		float since = clamp((sim_time - drill_state.x) / 4.0, 0.0, 1.0);
@@ -337,8 +399,10 @@ void vertex() {
 	float yaw = pose.z;
 	float transit = pose.w;
 
-	// Rout: scatter, turn about and run.
-	float rout = anim_state.z;
+	// Rout: scatter, turn about and run; rallying, close up again.
+	float rz = anim_state.z;
+	float rout = rz > 0.0 ? clamp((sim_time - (rz - 1.0)) / ROUT_T, 0.0, 1.0)
+		: (rz < 0.0 ? clamp(1.0 - (sim_time - (-rz - 1.0)) / RALLY_T, 0.0, 1.0) : 0.0);
 	pos += (vec2(h2, h3) - 0.5) * 0.12;
 	pos += (vec2(h3, h4) * 2.0 - 1.0) * vec2(22.0, 30.0) * rout;
 	yaw = mix(yaw, PI + (h4 - 0.5) * 1.2, clamp(rout * 4.0, 0.0, 1.0));
@@ -349,18 +413,35 @@ void vertex() {
 	float swing = sin(phase) * 0.45 * moving;
 	float bob = abs(cos(phase)) * 0.035 * moving;
 
-	// Volley: front two ranks present, then fire raggedly.
+	// Fire: the front two ranks present, fire and recover. Volley: everyone at
+	// the word, raggedly. By platoon: company after company from the right, the
+	// same schedule as BattleSim.continuous_fire. At will: each man on his own
+	// reloading cycle. vt is the shot this man is presenting for or has just fired.
 	float vt = anim_state.y;
+	float jitter = h2 * 0.35;
+	int fire_mode = int(drill_state.y + 0.5);
+	if (fire_mode > 0 && !staff) {
+		float cyc = fire_mode == 1 ? PLATOON_CYCLE : AT_WILL_CYCLE;
+		float first = drill_state.z + (fire_mode == 1 ? float(b.c - 1 - k) * PLATOON_CYCLE / float(b.c) : h4 * AT_WILL_CYCLE);
+		vt = first + max(ceil((sim_time - 0.9 - first) / cyc), 0.0) * cyc;
+		vt = vt <= drill_state.w ? vt : -1000.0;
+		jitter = fire_mode == 1 ? jitter : 0.0;
+	}
 	float fire_rank = staff ? 0.0 : step(rank, 1.5) * (1.0 - moving);
 	float present = fire_rank * smoothstep(vt - 1.6, vt - 1.1, sim_time) * (1.0 - smoothstep(vt + 0.3, vt + 0.9, sim_time));
-	float shot_t = vt + h2 * 0.35;
+	float shot_t = vt + jitter;
 	float flash = fire_rank * step(shot_t, sim_time) * (1.0 - step(shot_t + 0.09, sim_time));
 
 	int part = int(UV.y + 0.5);
 	vec3 v = VERTEX;
 	vec3 nrm = NORMAL;
 	bool mounted = role == 3;
-	if (((mask >> part) & 1) == 0) {
+	// A company out skirmishing is drawn by its own formation, not here.
+	int away_company = staff ? (i < 5 * b.c ? i / 5 : -1) : k;
+	bool away = away_company >= 0 && ((int(form_state.w + 0.5) >> away_company) & 1) == 1;
+	// Skirmishers have no colours, chef or adjutants with them.
+	away = away || (staff && fb == OPEN && i >= 5 * b.c);
+	if (away || ((mask >> part) & 1) == 0) {
 		v = vec3(0.0, -50.0, 0.0);
 	} else if (part == P_LEG_L || part == P_LEG_R) {
 		if (mounted) {

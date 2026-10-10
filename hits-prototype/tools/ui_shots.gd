@@ -36,16 +36,38 @@ func _initialize() -> void:
 		[t + 7.0, func(): _activate_first_brigade(), "08_oob_to_map"],
 		[t + 8.0, func(): _draft_order(), "09_map_order_draft"],
 		[t + 9.0, func(): battle.map.issue_draft(), "10_map_order_sent"],
-		[t + 10.0, func(): _overhead(), "11_overhead"],
+		[t + 10.0, func(): _battalion_attack(), "11_map_battalion_attack"],
+		[t + 11.0, func(): _overhead(), "12_overhead"],
 	]
 
 
 ## With the brigade selected from the order of battle: right-click 350 m ahead
 ## of it and choose line, leaving the order popup open.
 func _draft_order() -> void:
-	var b = battle.sim.brigades[battle.map.selected]
-	battle.map._set_draft_dest(b.centroid() + Vector2(0, -350))
+	var b = battle.map.selected
+	battle.map._set_draft_target(battle.map.to_px(b.position() + Vector2(0, -350)))
 	battle.map.set_draft_ftype(0)
+
+
+## One battalion of the selected brigade, right-clicking the nearest enemy
+## battalion that has been seen: the order sheet for an attack, left open.
+func _battalion_attack() -> void:
+	var map = battle.map
+	var b = map.selected
+	if map._is_battalion(b):
+		b = b.parent
+	var f = b.battalions[1]
+	map.select(f)
+	var best = null
+	for e in battle.sim.formations:
+		if e.army != battle.PLAYER_ARMY and not e.dead and e.seen_time > -1.0e8:
+			if best == null or e.seen_pos.distance_to(f.pos) < best.seen_pos.distance_to(f.pos):
+				best = e
+	if best != null:
+		map.focus((f.pos + best.seen_pos) * 0.5, 2.5)
+		map._set_draft_target(map.to_px(best.seen_pos))
+		map._draft_intensity = 2
+		map._intensity_buttons[2].button_pressed = true
 
 
 ## Free camera high behind the player's army, looking over it towards the enemy.

@@ -24,18 +24,18 @@ const REASON_TEXT := ["facing the enemy", "facing the line of march", "keeping i
 const COMPASS := ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
 
-## {"facing": yaw, "reason": Reason} for brigade `b` forming `ftype` at `dest`.
-## A march column always faces along the road it takes; other formations front
-## the enemy if there is any near the destination.
-static func decide(sim, b, dest: Vector2, ftype: int) -> Dictionary:
+## {"facing": yaw, "reason": Reason} for unit `u` (a brigade or a battalion)
+## forming `ftype` at `dest`. A march column always faces along the road it
+## takes; other formations front the enemy if there is any near the destination.
+static func decide(sim, u, dest: Vector2, ftype: int) -> Dictionary:
 	if ftype != T.MARCH:
-		var threat := threat_direction(sim, b.army, dest)
+		var threat := threat_direction(sim, u.army, dest)
 		if threat != Vector2.ZERO:
 			return {"facing": yaw_of(threat), "reason": Reason.ENEMY}
-	var march: Vector2 = dest - b.centroid()
+	var march: Vector2 = dest - u.position()
 	if march.length() > MIN_MARCH:
 		return {"facing": yaw_of(march), "reason": Reason.MARCH}
-	return {"facing": current_front(b), "reason": Reason.HOLD}
+	return {"facing": current_front(u), "reason": Reason.HOLD}
 
 
 ## Direction of the enemy as seen from `p`: each formed enemy battalion in range
@@ -54,11 +54,12 @@ static func threat_direction(sim, army: int, p: Vector2) -> Vector2:
 	return sum.normalized()
 
 
-## The brigade's present front: the mean of its battalions' facings.
-static func current_front(b) -> float:
+## The unit's present front: the mean of its battalions' facings.
+static func current_front(u) -> float:
 	var sum := Vector2.ZERO
-	for f in b.alive():
-		sum += f.forward()
+	for f in u.battalions_all():
+		if not f.dead:
+			sum += f.forward()
 	return yaw_of(sum) if sum != Vector2.ZERO else 0.0
 
 
