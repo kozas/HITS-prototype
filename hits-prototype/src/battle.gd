@@ -18,6 +18,7 @@ const Hud = preload("res://src/hud.gd")
 const Meshes = preload("res://src/meshes.gd")
 const Formation = preload("res://src/formation.gd")
 const Orientation = preload("res://src/orientation.gd")
+const Order = preload("res://src/order.gd")
 
 const PLAYER_ARMY := 0
 const TIME_SCALES := [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
@@ -110,8 +111,7 @@ func _ready() -> void:
 	couriers = Couriers.new()
 	add_child(couriers)
 	couriers.setup(sim, terrain)
-	couriers.notify = func(text: String) -> void: hud.toast(text)
-	sim.order_sink = func(o: Dictionary) -> void: couriers.dispatch(o, _hq_for(o.army))
+	sim.order_origin = _hq_for
 
 	player = PlayerRider.new()
 	add_child(player)
@@ -302,15 +302,17 @@ func _hq_for(army: int) -> Vector2:
 
 
 ## The general writes an order (where, and in what formation) and a courier
-## rides off with it. The brigade chooses its own front when it acts on it.
-func issue_player_order(brigade_id: int, dest: Vector2, ftype: int) -> void:
-	var b = sim.brigades[brigade_id]
-	var o: Dictionary = sim.make_order(b, dest, ftype)
-	o.player = true
+## rides off with it. The recipient chooses its own front when it acts on it.
+func issue_player_order(recipient, dest: Vector2, ftype: int):
+	return send_player_order(sim.make_order(recipient, dest, ftype))
+
+
+func send_player_order(o):
 	player_orders.append(o)
-	couriers.dispatch(o, player_xz())
-	var dist: float = player_xz().distance_to(b.centroid())
-	hud.toast("Courier rides for %s (%s, %.1f km away)" % [b.label, Formation.TYPE_NAMES[ftype], dist / 1000.0])
+	sim.send_order(o, player_xz())
+	var dist: float = player_xz().distance_to(o.recipient.position())
+	hud.toast("Courier rides for %s (%s, %.1f km away)" % [o.recipient.label, Order.KIND_NAMES[o.kind], dist / 1000.0])
+	return o
 
 
 func clock_text() -> String:
@@ -485,8 +487,8 @@ func _process(delta: float) -> void:
 		_autoshot(delta)
 	var t0 := Time.get_ticks_usec()
 	sim.advance(delta * ts)
-	couriers.update(delta * ts, sim.time)
 	_consume_events()
+	couriers.update(sim.alpha(), sim.time)
 	if int(sim.time) != _last_dust:
 		_last_dust = int(sim.time)
 		smoke.update_dust(sim.formations, sim.time, terrain)
@@ -543,11 +545,23 @@ func _consume_events() -> void:
 			"rout":
 				if ev.f.army == PLAYER_ARMY and not bench:
 					hud.toast("Battalion %s (%s) is breaking!" % [ev.f.label, sim.brigades[ev.f.brigade].label])
+			"order_delivered":
+				var o: Order = ev.o
+				if o.by_player() and not bench:
+					hud.toast("Order delivered to %s (%s after writing)" % [o.recipient.label, _mmss(sim.time - o.issued)])
+			"order_lost":
+				var o: Order = ev.o
+				if o.by_player() and not bench:
+					hud.toast("No word from the courier sent to %s..." % o.recipient.label)
 			"order_executing":
-				var o: Dictionary = ev.o
-				if o.get("player", false) and not bench:
-					hud.toast("%s moves off to form %s, %s" % [sim.brigades[o.brigade].label, Formation.TYPE_NAMES[o.ftype].to_lower(), Orientation.describe(o.facing, o.facing_reason)])
+				var o: Order = ev.o
+				if o.by_player() and not bench:
+					hud.toast("%s moves off to form %s, %s" % [o.recipient.label, Formation.TYPE_NAMES[o.ftype].to_lower(), Orientation.describe(o.facing, o.facing_reason)])
 	sim.events.clear()
+
+
+static func _mmss(s: float) -> String:
+	return "%d:%02d" % [int(s) / 60, int(s) % 60]
 
 
 func _update_hud() -> void:
@@ -562,7 +576,7 @@ func _update_hud() -> void:
 		"script: sim+couriers %.2f ms   render sync %.2f ms (LOS %.2f)" % [_sim_usec / 1000.0, _render_usec / 1000.0, renderer.los_usec / 1000.0],
 		"men alive %d  (French %d / Allied %d)   battalions %d   fallen %d" % [sim.soldiers_alive(), sim.soldiers_alive(0), sim.soldiers_alive(1), sim.formations.size(), corpses.total],
 		"near %d bn / %dk men | mid %d / %dk | far %d / %dk | ribbon %d / %dk | hidden %d / %dk" % [tb[0], tm[0] / 1000, tb[1], tm[1] / 1000, tb[2], tm[2] / 1000, tb[3], tm[3] / 1000, tb[4], tm[4] / 1000],
-		"LOD %s   LOS culling %s   smoke puffs %d   couriers riding %d (delivered %d, lost %d)" % [FormationRenderer.LOD_MODES[renderer.lod_mode], "on" if renderer.los_enabled else "off", smoke.live_estimate(), couriers.riding_count(PLAYER_ARMY), couriers.delivered, couriers.lost],
+		"LOD %s   LOS culling %s   smoke puffs %d   couriers riding %d (delivered %d, lost %d)" % [FormationRenderer.LOD_MODES[renderer.lod_mode], "on" if renderer.los_enabled else "off", smoke.live_estimate(), sim.riding_count(PLAYER_ARMY), sim.couriers_delivered, sim.couriers_lost],
 		("free camera" if using_free_cam else "in the saddle: %s" % ("telescope x%d" % roundi(player.magnification) if player.telescope else player.gait())) + ("   autopilot ON" if sim.ai_enabled[PLAYER_ARMY] else ""),
 	]
 	hud.stats.text = "\n".join(lines)

@@ -8,6 +8,9 @@ const Command = preload("res://src/command.gd")
 const Brigade = preload("res://src/brigade.gd")
 const OobNames = preload("res://src/oob_names.gd")
 const Orientation = preload("res://src/orientation.gd")
+const Order = preload("res://src/order.gd")
+const Objective = preload("res://src/objective.gd")
+const BrigadeBrain = preload("res://src/ai/brigade_brain.gd")
 const T := Formation.Type
 
 const TICK := 0.1
@@ -30,23 +33,55 @@ var brigades: Array = []
 var armies: Array = [null, null]
 var names: OobNames
 var _regiment := [0, 0]
+## Sim time is a pure function of the tick count, so it never drifts and the
+## same ticks give the same battle whatever the frame rate.
 var time := 0.0
 var accum := 0.0
 var tick_count := 0
 var events: Array = []
 var ai_enabled := [false, true]
 var hq := [Vector2.ZERO, Vector2.ZERO]
-## Callable(order: Dictionary): hands AI orders to the courier system.
-var order_sink: Callable
+## Callable(army: int) -> Vector2: where an army's orders are written (the
+## player's are written wherever the general is). Defaults to `hq`.
+var order_origin: Callable
+var couriers: Array = []
+var couriers_delivered := 0
+var couriers_lost := 0
+## Per-phase microseconds of _tick, filled when `profile` is on (sim_profile.gd).
+var profile := false
+var phase_usec := {}
 var _grid := {}
 var _hits: Array = []
 var _order_id := 0
+## Commands with orders waiting out their staff work.
+var _mail: Array = []
+## Every random draw in the sim comes from here, in tick order: determinism.
 var rng := RandomNumberGenerator.new()
+var _personality_rng := RandomNumberGenerator.new()
+
+
+## A rider carrying an order. He rides to wherever the recipient's commander is
+## *now*, can be shot riding past the enemy, and rides home afterwards.
+class Courier:
+	var pos := Vector2.ZERO
+	var prev_pos := Vector2.ZERO
+	var home := Vector2.ZERO
+	var army := 0
+	var order
+	var target := Vector2.ZERO
+	var returning := false
+	var hazard_t := 1.0  # re-aim and run the gauntlet on the first tick
+
+
+const COURIER_SPEED := 6.5  # m/s, a hard canter over broken ground (~23 km/h)
+const COURIER_HAZARD_RADIUS := 140.0
+const COURIER_HAZARD_PER_SEC := 0.03
 
 
 func _init(t) -> void:
 	terrain = t
 	rng.seed = 1815
+	_personality_rng.seed = 1769
 	names = OobNames.new(1815)
 
 
@@ -80,10 +115,7 @@ func deploy(bns_per_side: int, men: int, front_z: float) -> void:
 			if row <= 1:
 				var dest := Vector2(bx, sgn * (160.0 if row == 0 else 400.0))
 				var o := make_order(b, dest, T.LINE if row == 0 else T.COLUMN, yaw)
-				o.status = "staff"
-				o.delivered = 0.0
-				o.exec_at = rng.randf_range(0.0, 30.0)
-				b.pending.append(o)
+				_hand_over(o, rng.randf_range(0.0, 30.0))
 		_organise(army)
 
 
@@ -106,11 +138,7 @@ func deploy_contact(site: Vector2, men: int, gap: float) -> void:
 		_organise(army)
 	# Advance to 60 m short of the enemy line: close enough to stay in line
 	# (no column for the march) and the halt-and-fire SOP stops them at musket range.
-	var o := make_order(brigades[0], Vector2(site.x, site.y - gap * 0.5 + 60.0), T.LINE, 0.0)
-	o.status = "staff"
-	o.delivered = 0.0
-	o.exec_at = 0.0
-	brigades[0].pending.append(o)
+	_hand_over(make_order(brigades[0], Vector2(site.x, site.y - gap * 0.5 + 60.0), T.LINE, 0.0), 0.0)
 	ai_enabled = [false, false]
 
 
@@ -165,6 +193,7 @@ func _add_brigade(army: int, row: int) -> Brigade:
 	b.title = n[0]
 	b.label = n[1]
 	b.ai_next = rng.randf_range(20.0, 120.0)
+	b.roll_personality(_personality_rng)
 	brigades.append(b)
 	return b
 
@@ -200,7 +229,8 @@ func _add_battalion(b: Brigade, men: int, p: Vector2, yaw: float, ftype: int) ->
 	f.prev_pos = p
 	f.refresh_shape()
 	f.next_fire = rng.randf_range(0.0, 10.0)
-	b.battalions.append(f)
+	f.roll_personality(_personality_rng)
+	b.add_battalion(f)
 	formations.append(f)
 	return f
 
@@ -215,6 +245,7 @@ func _organise(army: int) -> void:
 	a.title = OobNames.ARMY_TITLES[army]
 	a.label = a.title
 	a.commander = names.commander(army, Command.Level.ARMY)
+	a.roll_personality(_personality_rng)
 	armies[army] = a
 	var corps = null
 	var division = null
@@ -230,6 +261,9 @@ func _organise(army: int) -> void:
 			n_div += 1
 			division = _add_command(corps, Command.Level.DIVISION, OobNames.division_title(army, n_div))
 		division.add(b)
+		# Orders handed over before the battle came from army headquarters.
+		for o in b.inbox:
+			o.issuer = a
 
 
 func _add_command(parent, level: int, title: String):
@@ -239,36 +273,91 @@ func _add_command(parent, level: int, title: String):
 	c.title = title
 	c.label = title
 	c.commander = names.commander(parent.army, level)
+	c.roll_personality(_personality_rng)
 	parent.add(c)
 	return c
 
 
-## An order is a destination and a formation. `facing` is normally left null:
-## the brigade decides its own front when it acts on the order (Orientation).
-## Scripted openings may still fix it.
-func make_order(b, dest: Vector2, ftype: int, facing = null) -> Dictionary:
+## A blank order from `issuer` (null: the player) to `recipient`.
+func new_order(recipient, kind: int, objective, issuer = null) -> Order:
 	_order_id += 1
-	return {
-		"id": _order_id, "army": b.army, "brigade": b.id, "dest": dest, "facing": facing,
-		"facing_reason": -1, "ftype": ftype, "issued": time, "delivered": -1.0, "exec_at": -1.0,
-		"status": "riding",
-	}
+	var o := Order.new()
+	o.id = _order_id
+	o.army = recipient.army
+	o.recipient = recipient
+	o.issuer = issuer
+	o.kind = kind
+	o.objective = objective
+	o.issued = time
+	return o
 
 
-## Called by a courier when it reaches the brigade commander.
-func deliver_order(o: Dictionary) -> void:
-	var b = brigades[o.brigade]
-	o.status = "staff"
+## Go to `dest` and form `ftype` there. `facing` is normally left null: the
+## recipient decides its own front when it acts (Orientation). Scripted
+## openings may still fix it.
+func make_order(recipient, dest: Vector2, ftype: int, facing = null, issuer = null) -> Order:
+	var o := new_order(recipient, Order.Kind.MOVE, Objective.point(dest), issuer)
+	o.ftype = ftype
+	o.facing = facing
+	return o
+
+
+## Send an order by courier from `origin`.
+func send_order(o: Order, origin: Vector2) -> void:
+	var c := Courier.new()
+	c.pos = origin
+	c.prev_pos = origin
+	c.home = origin
+	c.army = o.army
+	c.order = o
+	couriers.append(c)
+	o.recipient.awaiting = true
+	_set_status(o, Order.Status.RIDING)
+
+
+## Where `army`'s orders are written.
+func origin_of(army: int) -> Vector2:
+	return order_origin.call(army) if order_origin.is_valid() else hq[army]
+
+
+## The order reaches the recipient's commander: staff work begins.
+func deliver_order(o: Order) -> void:
+	var cmd = o.recipient
 	o.delivered = time
-	# Staff work: reading, deciding, passing it down to battalions.
-	o.exec_at = time + rng.randf_range(20.0, 75.0)
-	b.pending.append(o)
-	b.awaiting = false
+	o.exec_at = time + cmd.staff_delay(rng)
+	_queue(o)
+	_set_status(o, Order.Status.PREPARING)
+	events.append({"type": "order_delivered", "o": o})
 
 
-func order_lost(o: Dictionary) -> void:
-	o.status = "lost"
-	brigades[o.brigade].awaiting = false
+## An order already in the recipient's hands before the battle, acted on at `at`.
+func _hand_over(o: Order, at: float) -> void:
+	o.delivered = 0.0
+	o.exec_at = at
+	o.status = Order.Status.PREPARING
+	_queue(o)
+
+
+func _queue(o: Order) -> void:
+	var cmd = o.recipient
+	cmd.inbox.append(o)
+	cmd.awaiting = false
+	if not _mail.has(cmd):
+		_mail.append(cmd)
+
+
+func order_lost(o: Order) -> void:
+	o.recipient.awaiting = false
+	_set_status(o, Order.Status.LOST)
+	events.append({"type": "order_lost", "o": o})
+
+
+## Every status change goes through here, so the UI can follow by events.
+func _set_status(o: Order, s: int) -> void:
+	o.status = s
+	if s >= Order.Status.COMPLETE:
+		o.finished = time
+	events.append({"type": "order_status", "o": o})
 
 
 # ---------------------------------------------------------------- stepping
@@ -287,26 +376,101 @@ func alpha() -> float:
 	return clampf(accum / TICK, 0.0, 1.0)
 
 
+## Per-tick work at 10 Hz. The 1 Hz work (separation, slopes, musketry and
+## morale, commanders) is staggered: each tick takes the units whose id falls in
+## that tick's tenth, so no single tick carries it all.
 func _tick() -> void:
-	time += TICK
 	tick_count += 1
+	time = tick_count * TICK
+	var slot := tick_count % 10
+	var t := _now_usec()
 	_process_orders()
+	t = _prof("orders", t)
+	_step_couriers(TICK)
+	t = _prof("couriers", t)
 	_apply_hits()
+	t = _prof("hits", t)
 	for f: Formation in formations:
 		_move(f, TICK)
+	t = _prof("move", t)
 	# Broad-phase work at 2 Hz: battalions move < 1.5 m per tick, cells are 300 m.
 	if tick_count % 5 == 0:
 		_rebuild_grid()
-	if tick_count % 10 == 0:
-		_separate()
-		_update_slopes()
-		_combat(1.0)
-		_ai()
+		t = _prof("grid (2 Hz)", t)
+	_separate(slot)
+	t = _prof("separate (1 Hz)", t)
+	_update_slopes(slot)
+	t = _prof("slopes (1 Hz)", t)
+	_combat(slot, 1.0)
+	t = _prof("combat (1 Hz)", t)
+	_ai(slot)
+	for b in brigades:
+		if b.id % 10 == slot:
+			BrigadeBrain.think(self, b)
+	t = _prof("commanders (1 Hz)", t)
+
+
+func _now_usec() -> int:
+	return Time.get_ticks_usec() if profile else 0
+
+
+func _prof(phase: String, since: int) -> int:
+	if not profile:
+		return 0
+	var now := Time.get_ticks_usec()
+	phase_usec[phase] = phase_usec.get(phase, 0) + now - since
+	return now
+
+
+func _step_couriers(dt: float) -> void:
+	if couriers.is_empty():
+		return
+	for c: Courier in couriers.duplicate():
+		c.prev_pos = c.pos
+		var o: Order = c.order
+		# Once a second: look for the recipient again (he moves), and risk the
+		# enemy's fire if riding close past him.
+		c.hazard_t += dt
+		if c.hazard_t >= 1.0:
+			c.hazard_t -= 1.0
+			if not c.returning:
+				if o.recipient.is_gone():
+					order_lost(o)
+					c.returning = true
+				else:
+					c.target = o.recipient.position()
+			if nearest_enemy(c.pos, c.army, COURIER_HAZARD_RADIUS) != null and rng.randf() < COURIER_HAZARD_PER_SEC:
+				if not c.returning:
+					couriers_lost += 1
+					order_lost(o)
+				couriers.erase(c)
+				continue
+		var to: Vector2 = (c.home if c.returning else c.target) - c.pos
+		var d: float = to.length()
+		var step := COURIER_SPEED * dt
+		if d <= maxf(step, 12.0):
+			if c.returning:
+				couriers.erase(c)
+				continue
+			deliver_order(o)
+			couriers_delivered += 1
+			c.returning = true
+			continue
+		c.pos += to / d * step
+
+
+func riding_count(army: int) -> int:
+	var n := 0
+	for c: Courier in couriers:
+		if c.army == army and not c.returning:
+			n += 1
+	return n
 
 
 ## Uphill slows a battalion; sampled at 1 Hz rather than every tick.
-func _update_slopes() -> void:
-	for f: Formation in formations:
+func _update_slopes(slot: int) -> void:
+	for i in range(slot, formations.size(), 10):
+		var f: Formation = formations[i]
 		if f.dead or not f.has_target:
 			continue
 		var dir := (f.target_pos - f.pos).normalized()
@@ -353,42 +517,43 @@ func nearest_enemy(p: Vector2, army: int, radius: float):
 	return best
 
 
+## Orders whose staff work is done are acted on, oldest first.
 func _process_orders() -> void:
-	for b in brigades:
-		if b.pending.is_empty():
-			continue
-		for o in b.pending.duplicate():
-			if time >= o.exec_at:
-				b.pending.erase(o)
-				_apply_order(b, o)
-
-
-func _apply_order(b, o: Dictionary) -> void:
-	var bns: Array = b.alive()
-	if bns.is_empty():
+	if _mail.is_empty():
 		return
-	var ft: int = o.ftype
-	if o.facing == null:
-		var d := Orientation.decide(self, b, o.dest, ft)
-		o.facing = d.facing
-		o.facing_reason = d.reason
-	var facing: float = o.facing
-	var slots := assign_slots(bns, o.dest, facing, ft)
-	for k in bns.size():
-		var f = bns[k]
-		if f.routing:
-			continue
-		f.target_pos = slots[k]
-		f.target_facing = facing
-		f.target_ftype = ft
-		f.has_target = true
-		var far: bool = f.pos.distance_to(f.target_pos) > 300.0
-		f.march_ftype = T.COLUMN if far and ft != T.MARCH else ft
-	if b.current != null and b.current.status == "executing":
-		b.current.status = "superseded"
-	o.status = "executing"
-	b.current = o
+	for cmd in _mail.duplicate():
+		for o: Order in cmd.inbox.duplicate():
+			if time >= o.exec_at:
+				cmd.inbox.erase(o)
+				_execute(cmd, o)
+		if cmd.inbox.is_empty():
+			_mail.erase(cmd)
+
+
+## The commander acts on an order: it replaces whatever he was doing.
+func _execute(cmd, o: Order) -> void:
+	if cmd.is_gone():
+		return
+	var ok := false
+	match cmd.level:
+		Command.Level.BRIGADE:
+			ok = BrigadeBrain.execute(self, cmd, o)
+		_:
+			push_warning("No brain yet for %s (level %d): order %d ignored" % [cmd.title, cmd.level, o.id])
+	if not ok:
+		return
+	if cmd.order != null and cmd.order.status == Order.Status.EXECUTING:
+		_set_status(cmd.order, Order.Status.SUPERSEDED)
+	cmd.order = o
+	cmd.detached = o.detached
+	_set_status(o, Order.Status.EXECUTING)
 	events.append({"type": "order_executing", "o": o})
+
+
+## The commander reports his order carried out.
+func complete_order(cmd) -> void:
+	_set_status(cmd.order, Order.Status.COMPLETE)
+	cmd.detached = false
 
 
 ## Sorts `bns` left to right across the new front (so no two battalions cross)
@@ -490,8 +655,11 @@ func _move(f: Formation, dt: float) -> void:
 		f.render_dirty = true
 
 
-func _separate() -> void:
-	for f: Formation in formations:
+## Pushes overlapping battalions apart. Each pair is handled once a second, in
+## the tick of the lower id.
+func _separate(slot: int) -> void:
+	for i in range(slot, formations.size(), 10):
+		var f: Formation = formations[i]
 		if f.dead:
 			continue
 		var c: Vector2 = f.cpos
@@ -515,8 +683,9 @@ func _separate() -> void:
 						e.pos -= push
 
 
-func _combat(dt: float) -> void:
-	for f: Formation in formations:
+func _combat(slot: int, dt: float) -> void:
+	for i in range(slot, formations.size(), 10):
+		var f: Formation = formations[i]
 		if f.dead:
 			continue
 		f.engaged = false
@@ -612,9 +781,9 @@ func _start_rout(f: Formation) -> void:
 
 # ---------------------------------------------------------------- AI
 
-func _ai() -> void:
+func _ai(slot: int) -> void:
 	for b in brigades:
-		if not ai_enabled[b.army] or time < b.ai_next or b.awaiting:
+		if b.id % 10 != slot or not ai_enabled[b.army] or time < b.ai_next or b.awaiting:
 			continue
 		b.ai_next = time + rng.randf_range(90.0, 150.0)
 		if b.alive().is_empty() or (b.row >= 2 and time < b.row * 240.0):
@@ -632,16 +801,12 @@ func _ai() -> void:
 		if target == null:
 			continue
 		var dir: Vector2 = (target.centroid() - c).normalized()
-		var o: Dictionary
+		var o: Order
 		if bd > 900.0:
-			o = make_order(b, c + dir * 450.0, T.COLUMN)
+			o = make_order(b, c + dir * 450.0, T.COLUMN, null, armies[b.army])
 		else:
-			o = make_order(b, target.centroid() - dir * 120.0, T.LINE if rng.randf() < 0.75 else T.COLUMN)
-		b.awaiting = true
-		if order_sink.is_valid():
-			order_sink.call(o)
-		else:
-			deliver_order(o)
+			o = make_order(b, target.centroid() - dir * 120.0, T.LINE if rng.randf() < 0.75 else T.COLUMN, null, armies[b.army])
+		send_order(o, origin_of(b.army))
 
 
 ## Stress helper: every battalion changes formation at once.

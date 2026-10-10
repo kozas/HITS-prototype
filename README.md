@@ -90,9 +90,17 @@ C:/Godot/Godot_v4.6.1-stable_win64_console.exe --headless --path hits-prototype 
 C:/Godot/Godot_v4.6.1-stable_win64_console.exe --headless --fixed-fps 60 --path hits-prototype --script res://tools/contact_test.gd
 ```
 
-`sim_profile.gd` gives a per-phase sim cost. `order_test.gd` checks the command
-loop end to end: order → courier → staff delay → execution. `contact_test.gd`
-checks that Brigade contact reaches musketry within 45 s.
+```bash
+C:/Godot/Godot_v4.6.1-stable_win64_console.exe --headless --path hits-prototype --script res://tools/determinism_test.gd
+```
+
+- `sim_profile.gd` runs the real sim tick and gives its cost per phase.
+- `order_test.gd` checks the command loop end to end on Corps command: order →
+  courier → staff delay → execution → the brigade reports the order done.
+- `contact_test.gd` checks that Brigade contact reaches musketry within 45 s.
+- `determinism_test.gd` checks that the battle depends only on the tick count:
+  10 sim-minutes reached in 16 ms frames and in 50 ms frames must leave every
+  battalion and courier in exactly the same state.
 
 Drill review needs a window. It puts one battalion through line → column →
 square → march → line → advance and saves oblique, close, flank and top-down
@@ -124,16 +132,18 @@ with an overhead view of the deployment.
 | `battle.tscn` + `src/battle.gd` | Battle scene: world setup per scenario, frame loop, input, benchmark |
 | `src/game_state.gd` | Autoload carrying the chosen scenario between scenes |
 | `src/formation.gd` | Battalion state. The atom of the sim |
-| `src/command.gd`, `src/brigade.gd` | Chain of command: army, corps and division HQs; brigades hold battalions and orders |
+| `src/command.gd`, `src/brigade.gd` | Chain of command: army, corps, division, brigade and (as `Formation`) battalion. Any level can receive an order |
+| `src/order.gd`, `src/objective.gd` | Orders (kind, objective, intensity, preferences, lifecycle) and what they point at |
+| `src/ai/` | Commanders' brains, one per level: they turn an order into orders for subordinates, or into drill |
 | `src/oob_names.gd` | Unit titles, numbering and (invented) commanders for the order of battle |
 | `src/oob_view.gd` | Order-of-battle viewer (O) |
-| `src/battle_sim.gd` | 10 Hz fixed-tick sim: orders, movement, musketry, morale, AI |
+| `src/battle_sim.gd` | 10 Hz fixed-tick, deterministic sim: orders, couriers, movement, musketry, morale, AI |
 | `src/formation_renderer.gd` | Per-battalion LOD tier, LOS culling, event-driven uniforms |
 | `shaders/soldier.gdshader` | Every man, officer and drummer: companies, formations, drill, marching, volleys, rout |
 | `shaders/ribbon.gdshader` | Whole battalion as one box at long range |
 | `src/smoke.gd` + `shaders/smoke.gdshader` | Stateless smoke and dust ring buffer |
 | `src/corpses.gd` | The fallen, 1:1, in spatial chunks |
-| `src/couriers.gd` | Riders that carry orders and can be shot |
+| `src/couriers.gd` | Draws the riders carrying orders (the sim moves them, and they can be shot) |
 | `src/orientation.gd` | How a unit chooses its own front (orders carry no facing) |
 | `src/terrain.gd` | Heightmap shared by GPU and CPU, LOS raymarch, map definitions (`MAPS`: "ridges", "hill") |
 | `src/map_overlay.gd` + `shaders/map_relief.gdshader` | The general's map (own troops, enemy at last-seen), zoomable, with relief and contours drawn from the heightmap |

@@ -10,13 +10,14 @@ extends Control
 
 const Formation = preload("res://src/formation.gd")
 const Orientation = preload("res://src/orientation.gd")
+const Order = preload("res://src/order.gd")
 const T := Formation.Type
 const ZOOM_RANGE := Vector2(1.0, 16.0)
 const INK := Color(0.1, 0.1, 0.2)
 const PARCHMENT := Color(0.95, 0.9, 0.75)
 const DRAFT := Color(0.3, 1, 0.3)
-const STATUS_TEXT := {"riding": "courier riding", "staff": "preparing", "executing": ""}
-const STATUS_COLOUR := {"riding": Color(1, 0.85, 0.2), "staff": Color(1, 0.5, 0.1), "executing": Color(1, 1, 1, 0.8)}
+const STATUS_TEXT := {Order.Status.RIDING: "courier riding", Order.Status.PREPARING: "preparing", Order.Status.EXECUTING: ""}
+const STATUS_COLOUR := {Order.Status.RIDING: Color(1, 0.85, 0.2), Order.Status.PREPARING: Color(1, 0.5, 0.1), Order.Status.EXECUTING: Color(1, 1, 1, 0.8)}
 
 var main
 var sim
@@ -186,7 +187,7 @@ func cancel_draft() -> void:
 func issue_draft() -> void:
 	if not _has_draft:
 		return
-	main.issue_player_order(selected, _draft_dest, _draft_ftype)
+	main.issue_player_order(sim.brigades[selected], _draft_dest, _draft_ftype)
 	cancel_draft()
 
 
@@ -269,21 +270,18 @@ func _draw() -> void:
 		draw_string(_font, c + Vector2(-20, -14 - (10 if labels else 0)), b.label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, INK)
 
 	for o in main.player_orders:
-		var st: String = o.status
+		var st: int = o.status
 		if not STATUS_COLOUR.has(st):
 			continue
-		var b = sim.brigades[o.brigade]
-		if st == "executing" and not _any_moving(b):
-			o.status = "complete"
-			continue
-		# Until the brigade acts on it, the order has no front: only the brigade decides that.
-		_draw_order(b.centroid(), o.dest, o.facing, STATUS_COLOUR[st], st == "riding")
-		var text: String = Formation.TYPE_NAMES[o.ftype]
+		# Until the recipient acts on it, the order has no front: only he decides that.
+		var dest: Vector2 = o.dest()
+		_draw_order(o.recipient.position(), dest, o.facing, STATUS_COLOUR[st], st == Order.Status.RIDING)
+		var text: String = Order.KIND_NAMES[o.kind] if o.ftype < 0 else Formation.TYPE_NAMES[o.ftype]
 		if STATUS_TEXT[st] != "":
 			text += ", " + STATUS_TEXT[st]
-		draw_string(_font, to_px(o.dest) + Vector2(10, 16), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, INK)
+		draw_string(_font, to_px(dest) + Vector2(10, 16), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, INK)
 
-	for c in main.couriers.couriers:
+	for c in sim.couriers:
 		if c.army == main.PLAYER_ARMY:
 			draw_circle(to_px(c.pos), 3.5, Color(1, 0.85, 0.2))
 
@@ -334,12 +332,6 @@ func _draw_scale_bar() -> void:
 	var text := ("%d m" % metres) if metres < 1000.0 else ("%d km" % int(metres / 1000.0))
 	draw_string(_font, o + Vector2(0, -8), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, INK)
 
-
-func _any_moving(b) -> bool:
-	for f in b.alive():
-		if f.has_target:
-			return true
-	return false
 
 
 ## Screen corners of a formation's footprint: front-left, front-right,

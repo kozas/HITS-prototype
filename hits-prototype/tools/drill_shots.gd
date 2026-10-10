@@ -33,7 +33,7 @@ func _process(_delta: float) -> bool:
 		return false
 	var sim = battle.sim
 	if f == null:
-		sim.brigades[0].pending.clear()  # hold the brigade in place
+		sim.brigades[0].inbox.clear()  # hold the brigade in place
 		f = sim.formations[bn]
 		battle.hud.visible = false
 		battle.time_scale_idx = 3  # x4

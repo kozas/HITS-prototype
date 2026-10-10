@@ -1,5 +1,6 @@
-extends RefCounted
-## One battalion: the atom of the simulation.
+extends "res://src/command.gd"
+## One battalion: the atom of the simulation, and the bottom of the chain of
+## command (it can take orders like any other Command).
 ## Individual soldiers have no CPU state at all; soldier.gdshader derives every
 ## man, officer and drummer from these fields. footprint_for() and colour_pos()
 ## must mirror the shader's battalion geometry (bn_make / bn_size / staff_pos).
@@ -14,12 +15,9 @@ const GUARD_W := 1.2
 const ORDINARY_STEP := 0.82  # pas ordinaire: 76 paces/min of 0.65 m
 const QUICK_STEP := 1.08     # pas accéléré: 100 paces/min
 
-var id := 0
-var army := 0
-var brigade := 0
-var label := ""      # short, e.g. "1/45e"
-var title := ""      # e.g. "1er bataillon, 45e de Ligne"
-var commander := ""
+var id := 0         # index in BattleSim.formations
+var brigade := 0    # index in BattleSim.brigades (also `parent`)
+# label: short, e.g. "1/45e"; title: e.g. "1er bataillon, 45e de Ligne"
 var strength := 600
 var max_strength := 600
 var ranks := 3
@@ -41,6 +39,10 @@ var target_pos := Vector2.ZERO
 var target_facing := 0.0
 var target_ftype: int = Type.LINE
 var march_ftype: int = Type.COLUMN
+## Its place in the brigade, as last laid out by the brigadier.
+var station := Vector2.ZERO
+var station_facing := 0.0
+var station_ftype: int = Type.LINE
 var moving := false
 var moving_since := -1000.0  # guides step out ahead when the battalion advances
 var slope_factor := 1.0
@@ -66,6 +68,22 @@ var seen_ftype := 0
 
 var render_dirty := true
 var fp := Vector2.ONE  # cached footprint; refresh_shape() when type or strength change
+
+
+func _init() -> void:
+	level = Level.BATTALION
+
+
+func battalions_all() -> Array:
+	return [self]
+
+
+func position() -> Vector2:
+	return cpos
+
+
+func is_gone() -> bool:
+	return dead
 
 
 func refresh_shape() -> void:

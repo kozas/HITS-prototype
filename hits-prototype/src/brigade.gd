@@ -1,18 +1,21 @@
 extends "res://src/command.gd"
-## The lowest headquarters: commands battalions directly, receives orders by
-## courier and lays its battalions out to carry them out (BattleSim._apply_order).
+## The lowest headquarters above the battalion: commands battalions directly,
+## receives orders by courier and lays its battalions out to carry them out
+## (BrigadeBrain).
 
 var id := 0
 var row := 0
 var battalions: Array = []
-var pending: Array = []
-var current = null
-var awaiting := false
 var ai_next := 0.0
 
 
 func _init() -> void:
 	level = Level.BRIGADE
+
+
+func add_battalion(f) -> void:
+	add(f)
+	battalions.append(f)
 
 
 func battalions_all() -> Array:
@@ -35,3 +38,7 @@ func centroid() -> Vector2:
 			c += f.center()
 			n += 1
 	return c / n if n > 0 else Vector2.ZERO
+
+
+func position() -> Vector2:
+	return centroid()

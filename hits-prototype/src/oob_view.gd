@@ -8,6 +8,7 @@ extends Control
 const Formation = preload("res://src/formation.gd")
 const Command = preload("res://src/command.gd")
 const Brigade = preload("res://src/brigade.gd")
+const Order = preload("res://src/order.gd")
 
 const PARCHMENT := Color(0.93, 0.88, 0.74)
 const DIM := Color(0.68, 0.64, 0.54)
@@ -207,12 +208,10 @@ func _brigade_state(b) -> String:
 		return "destroyed"
 	if b.awaiting:
 		return "courier on the way"
-	if not b.pending.is_empty():
+	if not b.inbox.is_empty():
 		return "orders received"
-	if b.current != null and b.current.status == "executing":
-		for f in b.alive():
-			if f.has_target:
-				return "carrying out orders"
+	if b.order != null and b.order.status == Order.Status.EXECUTING:
+		return "carrying out orders"
 	return "holding"
 
 
